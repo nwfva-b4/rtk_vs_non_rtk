@@ -17,15 +17,17 @@
 if (!file.exists(paste('data')) |
     (!file.exists(paste('data/raw_data')) |
      (!file.exists(paste('data/raw_data/forest_inventory')) |
-      (!file.exists(paste('data/processed_data')) |
-       (!file.exists(paste('data/processed_data/forest_inventory')) |
-        (!file.exists(paste('data/metadata'))
-         ))))))
+      (!file.exists(paste('data/raw_data/pc_leafoff_2024')) |
+       (!file.exists(paste('data/processed_data')) |
+        (!file.exists(paste('data/processed_data/forest_inventory')) |
+         (!file.exists(paste('data/metadata'))
+          )))))))
   {
   
   dir.create('data')
   dir.create('data/raw_data')
   dir.create('data/raw_data/forest_inventory')
+  dir.create('data/raw_data/pc_leafoff_2024')
   dir.create('data/processed_data')
   dir.create('data/processed_data/forest_inventory')
   dir.create('data/metadata')
@@ -93,6 +95,9 @@ raw_data_dir <- 'data/raw_data/'
 
 # define processed data directory
 processed_data_dir <- 'data/processed_data/'
+
+# define meta data directory
+meta_data_dir <- 'data/metadata/'
 
 # define output directory
 output_dir <- 'output/'
