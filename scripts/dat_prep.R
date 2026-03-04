@@ -70,6 +70,19 @@ bi_plots <- dplyr::left_join(bi_plots, accuracy_per_point, by = 'point_nr')
 
 bi_plots$point_nr <- NULL
 
+
+
+# 03 - spatial cropping to point cloud extent
+#-------------------------------------------------------------------------------
+
+# read leaf-off point cloud extent
+ext_loff <- sf::st_read(
+  file.path(raw_data_dir, 'pc_leafoff_2024', 'leafoff.vpc')
+)
+
+ext_loff <- sf::st_transform(ext_loff, sf::st_crs(bi_plots))
+bi_plots <- sf::st_crop(bi_plots, sf::st_bbox(ext_loff))
+
 sf::st_write(
   bi_plots,
   file.path(processed_data_dir, 'forest_inventory', 'bi_center_points_pos_acc.gpkg')
