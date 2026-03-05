@@ -70,6 +70,11 @@ bi_plots <- dplyr::left_join(bi_plots, accuracy_per_point, by = 'point_nr')
 
 bi_plots$point_nr <- NULL
 
+# add column for solution status based on the hz_accuracy
+bi_plots$solution_status <- ifelse(
+  bi_plots$hz_accuracy <= 0.1, 'fix', 'float'
+)
+
 
 
 # 03 - spatial cropping to point cloud extent
@@ -85,5 +90,6 @@ bi_plots <- sf::st_crop(bi_plots, sf::st_bbox(ext_loff))
 
 sf::st_write(
   bi_plots,
-  file.path(processed_data_dir, 'forest_inventory', 'bi_center_points_pos_acc.gpkg')
+  file.path(processed_data_dir, 'forest_inventory', 'bi_center_points_pos_acc.gpkg'),
+  delete_dsn = T
   )
