@@ -18,14 +18,19 @@ This analysis compares the positional accuracy of GNSS and RTK-corrected GNSS me
 
 ```{r}
 #| label: setup
-#| message: false
+#| include: false
 proj_root <- if (file.exists('src/setup.R')) '.' else '..'
 knitr::opts_knit$set(root.dir = normalizePath(proj_root))
 source(file.path(proj_root, 'src/setup.R'), local = TRUE)
 ```
 
+In Germany, forest management falls under the responsibility of the individual federal states. In Lower Saxony, the state forest service (Niedersächsische Landesforsten) monitors forest resources through permanent inventory plots (Betriebsinventur, BI) surveyed at 10-year intervals. The plot centers were originally positioned using standard GNSS. In the Solling region, a low mountain range in southern Lower Saxony, a subset of these plots (n = 63) was remeasured using RTK-GNSS during December 2023 and January 2024.
+
 ```{r}
-#| label: read-data
+#| label: data-reading
+#| include: false
+# reading RTK-corrected center points of the forest inventory 
+# in Lower Saxony (Betriebsinventur, BI) in the Solling region
 bi_plots <- st_read(
   file.path(processed_data_dir, 'forest_inventory',
             'bi_center_points_pos_acc.gpkg'),
@@ -35,8 +40,29 @@ bi_plots <- st_read(
 
 ```{r}
 #| label: fig-plot-map
+#| echo: false
 #| fig-cap: "Distribution of RTK-remeasured forest inventory plots in the Solling region."
 mapview::mapview(bi_plots, layer.name = "BI Plots")
+```
+
+The plot centers were remeasured using a [Trimble R2 GNSS receiver](https://utilities.trimble.com/de-de/products/trimble-r2). The RTK receiver reports a solution status for each measurement. A *fix* solution indicates that the carrier-phase ambiguities were resolved, which corresponds to centimeter-level accuracy. A *float* solution means that the ambiguities were not fully resolved, leading to lower accuracy in the range of decimeters to meters.
+
+```{r}
+#| label: tbl-solution-status
+#| echo: false
+#| tbl-cap: "RTK solution status of remeasured plots."
+bi_plots %>%
+  sf::st_drop_geometry() %>%
+  dplyr::count(solution_status) %>%
+  dplyr::mutate(pct = round(n / sum(n) * 100, 1)) %>%
+  knitr::kable(col.names = c('Solution Status', 'n', '%'))
+```
+
+```{r}
+#| label: fig-solution-status-map
+#| echo: false
+#| fig-cap: "Distribution of RTK-remeasured forest inventory plots in the Solling region based on their solution status (fix vs. float)."
+mapview::mapview(bi_plots, zcol = "solution_status", layer.name = "Solution Status")
 ```
 
 #### References
