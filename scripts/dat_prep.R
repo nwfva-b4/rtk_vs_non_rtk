@@ -71,8 +71,10 @@ bi_plots <- dplyr::left_join(bi_plots, accuracy_per_point, by = 'point_nr')
 bi_plots$point_nr <- NULL
 
 # add column for solution status based on the hz_accuracy
-bi_plots$solution_status <- ifelse(
-  bi_plots$hz_accuracy <= 0.1, 'fix', 'float'
+bi_plots$solution_status <- dplyr::case_when(
+  is.na(bi_plots$hz_accuracy)    ~ 'single',
+  bi_plots$hz_accuracy <= 0.1    ~ 'fix',
+  TRUE                           ~ 'float'
 )
 
 
