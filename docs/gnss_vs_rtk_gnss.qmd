@@ -1,7 +1,10 @@
 ---
 title: "GNSS vs. RTK-GNSS Positioning of Forest Inventory Plots"
 author: "Florian Franz"
-format: html
+format:
+  html:
+    toc: true
+    theme: lumen
 ---
 
 ## Indroduction
@@ -24,33 +27,144 @@ knitr::opts_knit$set(root.dir = normalizePath(proj_root))
 source(file.path(proj_root, 'src/setup.R'), local = TRUE)
 ```
 
-In Germany, forest management falls under the responsibility of the individual federal states. In Lower Saxony, the state forest service (Niedersächsische Landesforsten) monitors forest resources through permanent inventory plots (Betriebsinventur, BI) surveyed at 10-year intervals. The plot centers were originally positioned using standard GNSS. In the Solling region, a low mountain range in southern Lower Saxony, a subset of these plots (n = 63) was remeasured using RTK-GNSS during December 2023 and January 2024.
+In Germany, forest management falls under the responsibility of the individual federal states. In Lower Saxony, the state forest service (Niedersächsische Landesforsten) monitors forest resources through permanent inventory plots (Betriebsinventur, BI) surveyed at 10-year intervals. The plot centers were originally positioned using standard GNSS. In the Solling region, a low mountain range in southern Lower Saxony, a subset of these plots (n = 63) was remeasured using RTK-GNSS during December 2023 and January 2024. A second remeasurement campaign covering additional plots (n = 122) was carried out from December 2025 to March 2026.
 
 ```{r}
 #| label: data-reading
 #| include: false
-# reading RTK-corrected center points of the forest inventory 
-# in Lower Saxony (Betriebsinventur, BI) in the Solling region
+bi_plots_1 <- st_read(
+  file.path(processed_data_dir, 'forest_inventory',
+            'bi_center_points_2023_24.gpkg'),
+  quiet = T
+)
+
+bi_plots_2 <- st_read(
+  file.path(processed_data_dir, 'forest_inventory',
+            'bi_center_points_2025_26.gpkg'),
+  quiet = T
+)
+
 bi_plots <- st_read(
   file.path(processed_data_dir, 'forest_inventory',
-            'bi_center_points_pos_acc.gpkg'),
+            'bi_center_points_merged.gpkg'),
   quiet = T
 )
 ```
 
 ```{r}
-#| label: fig-plot-map
+#| label: fig-plot-map-campaigns
 #| echo: false
 #| fig-cap: "Distribution of RTK-remeasured forest inventory plots in the Solling region."
-mapview::mapview(bi_plots, layer.name = "BI Plots")
+bi_plots_1$campaign <- '2023/24'
+bi_plots_2$campaign <- '2025/26'
+bi_all <- rbind(bi_plots_1[, 'campaign'], bi_plots_2[, 'campaign'])
+mapview::mapview(bi_all, zcol = 'campaign', layer.name = 'Campaign')
 ```
 
-The plot centers were remeasured using a [Trimble R2 GNSS receiver](https://utilities.trimble.com/de-de/products/trimble-r2). The RTK receiver reports a solution status for each measurement. A *fix* solution indicates that the carrier-phase ambiguities were resolved, which corresponds to centimeter-level accuracy. A *float* solution means that the ambiguities were not fully resolved, leading to lower accuracy in the range of decimeters to meters.
+### Per-campaign details
+
+For the first campaign, a [Trimble R2 GNSS receiver](https://utilities.trimble.com/de-de/products/trimble-r2) was used, while for the second campaign, an [Emlid Reach RS3](https://eu.store.emlid.com/de-de/products/reach-rs3) was used. Both are multiband RTK-GNSS receivers. The RTK receiver reports a solution status for each measurement. A *fix* solution indicates that the carrier-phase ambiguities were resolved, which corresponds to centimeter-level accuracy. A *float* solution means that the ambiguities were not fully resolved, leading to lower accuracy in the range of decimeters to meters. A *single* solution indicates that no RTK correction was available and the position is based on standalone GNSS, with errors typically in the range of several meters.
+
+::: {layout-ncol=2}
 
 ```{r}
-#| label: tbl-solution-status
+#| label: tbl-solution-status-1
 #| echo: false
-#| tbl-cap: "RTK solution status of remeasured plots."
+#| tbl-cap: "Campaign 1 (2023/24)"
+bi_plots_1 %>%
+  sf::st_drop_geometry() %>%
+  dplyr::count(solution_status) %>%
+  dplyr::mutate(pct = round(n / sum(n) * 100, 1)) %>%
+  knitr::kable(col.names = c('Solution Status', 'n', '%'))
+```
+
+```{r}
+#| label: tbl-solution-status-2
+#| echo: false
+#| tbl-cap: "Campaign 2 (2025/26)"
+bi_plots_2 %>%
+  sf::st_drop_geometry() %>%
+  dplyr::count(solution_status) %>%
+  dplyr::mutate(pct = round(n / sum(n) * 100, 1)) %>%
+  knitr::kable(col.names = c('Solution Status', 'n', '%'))
+```
+
+:::
+
+::: {layout-ncol=2}
+
+```{r}
+#| label: fig-solution-status-map-1
+#| echo: false
+#| fig-cap: "Solution status — Campaign 1 (2023/24)"
+mapview::mapview(bi_plots_1, zcol = 'solution_status', layer.name = 'Solution Status')
+```
+
+```{r}
+#| label: fig-solution-status-map-2
+#| echo: false
+#| fig-cap: "Solution status — Campaign 2 (2025/26)"
+mapview::mapview(bi_plots_2, zcol = 'solution_status', layer.name = 'Solution Status')
+```
+
+:::
+
+The center of each inventory plot is physically marked with an iron bar in the ground. However, the iron bar was not always found during the remeasurement, for example when it was located in a skid trail. In such cases, the plot center position was estimated via triangulation using nearby trees identified from stem distribution maps.
+
+::: {layout-ncol=2}
+
+```{r}
+#| label: tbl-estimated-1
+#| echo: false
+#| tbl-cap: "Estimated center points — Campaign 1 (2023/24)"
+bi_plots_1 %>%
+  sf::st_drop_geometry() %>%
+  dplyr::count(center_point_estimated) %>%
+  dplyr::mutate(pct = round(n / sum(n) * 100, 1)) %>%
+  knitr::kable(col.names = c('Center Point Estimated', 'n', '%'))
+```
+
+```{r}
+#| label: tbl-estimated-2
+#| echo: false
+#| tbl-cap: "Estimated center points — Campaign 2 (2025/26)"
+bi_plots_2 %>%
+  sf::st_drop_geometry() %>%
+  dplyr::count(center_point_estimated) %>%
+  dplyr::mutate(pct = round(n / sum(n) * 100, 1)) %>%
+  knitr::kable(col.names = c('Center Point Estimated', 'n', '%'))
+```
+
+:::
+
+::: {layout-ncol=2}
+
+```{r}
+#| label: fig-estimated-map-1
+#| echo: false
+#| fig-cap: "Estimated center points — Campaign 1 (2023/24)"
+mapview::mapview(bi_plots_1, zcol = 'center_point_estimated', layer.name = 'Estimated Center Point')
+```
+
+```{r}
+#| label: fig-estimated-map-2
+#| echo: false
+#| fig-cap: "Estimated center points — Campaign 2 (2025/26)"
+mapview::mapview(bi_plots_2, zcol = 'center_point_estimated', layer.name = 'Estimated Center Point')
+```
+
+:::
+
+### Combined overview
+
+Combining both campaigns results in a **total of 185 RTK-remeasured plots** covering an area of approximately 20 km² in the Solling region.
+
+::: {layout-ncol=2}
+
+```{r}
+#| label: tbl-solution-status-combined
+#| echo: false
+#| tbl-cap: 'Solution status — both campaigns'
 bi_plots %>%
   sf::st_drop_geometry() %>%
   dplyr::count(solution_status) %>%
@@ -59,10 +173,30 @@ bi_plots %>%
 ```
 
 ```{r}
-#| label: fig-solution-status-map
+#| label: tbl-estimated-combined
 #| echo: false
-#| fig-cap: "Distribution of RTK-remeasured forest inventory plots in the Solling region based on their solution status (fix vs. float)."
-mapview::mapview(bi_plots, zcol = "solution_status", layer.name = "Solution Status")
+#| tbl-cap: 'Estimated center points — both campaigns'
+bi_plots %>%
+  sf::st_drop_geometry() %>%
+  dplyr::count(center_point_estimated) %>%
+  dplyr::mutate(pct = round(n / sum(n) * 100, 1)) %>%
+  knitr::kable(col.names = c('Center Point Estimated', 'n', '%'))
+```
+
+:::
+
+```{r}
+#| label: fig-combined-map
+#| echo: false
+#| fig-cap: 'Combined overview of all RTK-remeasured plots.'
+bi_combined <- rbind(
+  bi_plots_1[, c('campaign', 'solution_status', 'center_point_estimated')],
+  bi_plots_2[, c('campaign', 'solution_status', 'center_point_estimated')]
+)
+
+mapview::mapview(bi_combined, zcol = 'campaign', layer.name = 'Campaign') +
+  mapview::mapview(bi_combined, zcol = 'solution_status', layer.name = 'Solution Status', hide = TRUE) +
+  mapview::mapview(bi_combined, zcol = 'center_point_estimated', layer.name = 'Estimated Center Point', hide = TRUE)
 ```
 
 #### References
