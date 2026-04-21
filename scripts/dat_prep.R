@@ -23,7 +23,7 @@ bi_plots_1 <- sf::st_read(
 
 # read RTK-remeasured forest inventory plot centers
 bi_plots_2 <- sf::st_read(
-  file.path(raw_data_dir, 'forest_inventory', 'bi_center_points_solling_2025_26.shp')
+  file.path(raw_data_dir, 'forest_inventory', 'bi_center_points_solling_2025_26.gpkg')
 )
 
 # read metadata of RTK-remeasured plots from 2023/24
@@ -89,6 +89,10 @@ bi_plots_2 <- bi_plots_2 %>%
   dplyr::arrange(kspnr, dplyr::desc(center_point_estimated)) %>%
   dplyr::filter(!duplicated(kspnr))
 
+# harmonize geometry column naming for compatibility
+bi_plots_2 <- dplyr::rename(bi_plots_2, geometry = geom)
+sf::st_geometry(bi_plots_2) <- 'geometry'
+
 
 
 # 03 - solution status
@@ -114,7 +118,7 @@ bi_plots_1$measurement_date <- as.Date(bi_plots_1$datetime)
 
 # bi_plots_2: solution status is already in the data
 bi_plots_2$solution_status <- tolower(bi_plots_2$Solution)
-bi_plots_2$measurement_date <- as.Date(bi_plots_2$Avg.start)
+bi_plots_2$measurement_date <- as.Date(bi_plots_2$Averaging.start)
 
 # merge both RTK datasets
 bi_plots <- rbind(
