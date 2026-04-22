@@ -120,6 +120,11 @@ bi_plots_1$measurement_date <- as.Date(bi_plots_1$datetime)
 bi_plots_2$solution_status <- tolower(bi_plots_2$Solution)
 bi_plots_2$measurement_date <- as.Date(bi_plots_2$Averaging.start)
 
+
+# exclude single-solution plots from campaign 1 for analysis
+bi_plots_1 <- bi_plots_1 %>%
+  dplyr::filter(solution_status != 'single')
+
 # merge both RTK datasets
 bi_plots <- rbind(
   bi_plots_1[, c('kspnr', 'center_point_estimated', 'solution_status', 'measurement_date')],
