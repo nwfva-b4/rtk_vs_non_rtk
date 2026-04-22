@@ -27,7 +27,7 @@ knitr::opts_knit$set(root.dir = normalizePath(proj_root))
 source(file.path(proj_root, 'src/setup.R'), local = TRUE)
 ```
 
-In Germany, forest management falls under the responsibility of the individual federal states. In Lower Saxony, the state forest service (Niedersächsische Landesforsten) monitors forest resources through permanent inventory plots (Betriebsinventur, BI) surveyed at 10-year intervals. The plot centers were originally positioned using standard GNSS. In the Solling region, a low mountain range in southern Lower Saxony, a subset of these plots (n = 63) was remeasured using RTK-GNSS during December 2023 and January 2024. A second remeasurement campaign covering additional plots (n = 122) was carried out from December 2025 to March 2026.
+In Germany, forest management falls under the responsibility of the individual federal states. In Lower Saxony, the state forest service (Niedersächsische Landesforsten) monitors forest resources through permanent inventory plots (Betriebsinventur, BI) surveyed at 10-year intervals. The plot centers were originally positioned using standard GNSS. In the Solling region, a low mountain range in southern Lower Saxony, a subset of these plots (n = 61) was remeasured using RTK-GNSS during December 2023 and January 2024. A second remeasurement campaign covering additional plots (n = 122) was carried out from December 2025 to March 2026.
 
 ```{r}
 #| label: data-reading
@@ -65,6 +65,8 @@ mapview::mapview(bi_all, zcol = 'campaign', layer.name = 'Campaign')
 
 For the first campaign, a [Trimble R2 GNSS receiver](https://utilities.trimble.com/de-de/products/trimble-r2) was used, while for the second campaign, an [Emlid Reach RS3](https://eu.store.emlid.com/de-de/products/reach-rs3) was used. Both are multiband RTK-GNSS receivers. The RTK receiver reports a solution status for each measurement. A *fix* solution indicates that the carrier-phase ambiguities were resolved, which corresponds to centimeter-level accuracy. A *float* solution means that the ambiguities were not fully resolved, leading to lower accuracy in the range of decimeters to meters. A *single* solution indicates that no RTK correction was available and the position is based on standalone GNSS, with errors typically in the range of several meters.
 
+For the first campaign, two plots were recorded with a *single* solution. They were excluded from the further analysis. For the second campaign, six plots could not receive RTK corrections in the field. These plots were subsequently post-processed using Post-Processed Kinematic (PPK) correction and are retained in the analysis. As a result, these plots appear as fix or float solutions in the table below.
+
 ::: {layout-ncol=2}
 
 ```{r}
@@ -88,7 +90,6 @@ bi_plots_2 %>%
   dplyr::mutate(pct = round(n / sum(n) * 100, 1)) %>%
   knitr::kable(col.names = c('Solution Status', 'n', '%'))
 ```
-
 :::
 
 ::: {layout-ncol=2}
@@ -157,7 +158,7 @@ mapview::mapview(bi_plots_2, zcol = 'center_point_estimated', layer.name = 'Esti
 
 ### Combined overview
 
-Combining both campaigns results in a **total of 185 RTK-remeasured plots** covering an area of approximately 20 km² in the Solling region.
+Combining both campaigns results in a **total of 183 remeasured plots** covering an area of approximately 20 km² in the Solling region.
 
 ::: {layout-ncol=2}
 
