@@ -773,15 +773,19 @@ trees_rtk_filtered <- trees_rtk_filtered %>%
     basal_area_tree = (pi / 4) * (bhd / 100)^2,
     basal_area_ha = sum(basal_area_tree * nha, na.rm = T),
     dg = sqrt(sum(bhd^2 * nha, na.rm = T) / sum(nha, na.rm = T)),
-    # assign dominant leaf type to each plot
+    # assign dominant leaf type to each plot based on the basal area
+    # share of deciduous vs. coniferous trees, considering only trees
+    # from layer 1 (Hauptbestand) and 4 (Ueberhaelter)
     total_deciduous = sum(dplyr::if_else(
-      leaf_type == 'deciduous', nha, 0, missing = 0), na.rm = T),
+      leaf_type == 'deciduous' & bestschicht %in% c(1, 4),
+      basal_area_tree * nha, 0, missing = 0), na.rm = T),
     total_coniferous = sum(dplyr::if_else(
-      leaf_type == 'coniferous', nha, 0, missing = 0), na.rm = T),
+      leaf_type == 'coniferous' & bestschicht %in% c(1, 4),
+      basal_area_tree * nha, 0, missing = 0), na.rm = T),
     dominant_leaf_type = dplyr::case_when(
       total_deciduous > total_coniferous ~ 'deciduous',
       total_coniferous > total_deciduous ~ 'coniferous',
-      TRUE                               ~ 'tie'
+      TRUE                               ~ 'mixed'
     )) %>%
   dplyr::ungroup()
 
