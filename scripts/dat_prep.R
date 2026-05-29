@@ -133,7 +133,7 @@ bi_plots <- rbind(
 
 
 
-# 04 - spatial cropping to point cloud extent
+# 04 - spatial filtering to point cloud extent
 #-------------------------------------------------------------------------------
 
 # read leaf-off point cloud extent
@@ -143,9 +143,17 @@ ext_loff <- sf::st_read(
 
 ext_loff <- sf::st_transform(ext_loff, sf::st_crs(bi_plots))
 
-bi_plots_1 <- sf::st_crop(bi_plots_1, sf::st_bbox(ext_loff))
-bi_plots_2 <- sf::st_crop(bi_plots_2, sf::st_bbox(ext_loff))
-bi_plots   <- sf::st_crop(bi_plots,   sf::st_bbox(ext_loff))
+# keep only plots whose 13 m buffered footprint lies fully within the extent
+ext_geom <- sf::st_union(sf::st_buffer(ext_loff, 0.5))
+
+filter_within_extent <- function(plots, ext, radius = 13) {
+  buf <- sf::st_buffer(plots, radius)
+  plots[lengths(sf::st_within(buf, ext)) > 0, ]
+}
+
+bi_plots_1 <- filter_within_extent(bi_plots_1, ext_geom)
+bi_plots_2 <- filter_within_extent(bi_plots_2, ext_geom)
+bi_plots   <- filter_within_extent(bi_plots,   ext_geom)
 
 sf::st_write(
   bi_plots_1[, c('kspnr', 'center_point_estimated', 'solution_status', 'measurement_date')],
