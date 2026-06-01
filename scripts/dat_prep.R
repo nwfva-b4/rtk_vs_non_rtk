@@ -133,8 +133,11 @@ bi_plots <- rbind(
 
 
 
-# 04 - spatial filtering to point cloud extent
+# 04 - spatial filtering
 #-------------------------------------------------------------------------------
+
+# 04.1. extent filter
+#---------------------
 
 # read leaf-off point cloud extent
 ext_loff <- sf::st_read(
@@ -155,6 +158,69 @@ bi_plots_1 <- filter_within_extent(bi_plots_1, ext_geom)
 bi_plots_2 <- filter_within_extent(bi_plots_2, ext_geom)
 bi_plots   <- filter_within_extent(bi_plots,   ext_geom)
 
+# 04.2. angular sector coverage filter
+# drops plots whose point cloud has a large empty bin (data gap on one side),
+# even though the plot lies inside the nominal extent
+#-------------------------------------------------------------------------------
+
+laz_dir <- file.path(raw_data_dir, 'pc_leafoff_2024')
+
+laz_files_2024 <- list.files(
+  laz_dir, pattern = "_2024\\.laz$", full.names = T
+)
+
+ctg <- lidR::readLAScatalog(laz_files_2024)
+
+angular_sector_coverage <- function(ctg, x, y, radius = 13, n_sectors = 8) {
+  
+  # clip circular plot from the catalog around (x, y) with the given radius
+  las <- lidR::clip_circle(ctg, x, y, radius)
+  if (lidR::is.empty(las)) {
+    return(list(min_sector_frac = 0))
+  }
+  
+  # total number of points inside the circle
+  n_pts <- lidR::npoints(las)
+  
+  # angle of each point relative to the plot center, in radians (-pi..pi)
+  ang <- atan2(las$Y - y, las$X - x)
+  
+  # assign each point to one of n_sectors equal-width angular bins
+  sec <- cut(ang, breaks = seq(-pi, pi, length.out = n_sectors + 1),
+             include.lowest = T)
+  
+  # count how many points fell into each sector
+  counts <- as.integer(table(sec))
+  
+  # ratio of the emptiest sector to the expected share under uniform coverage
+  # (1.0 = perfectly uniform, 0 = at least one bin is completely empty)
+  min_sector_frac <- min(counts) / (n_pts / n_sectors)
+  
+  list(min_sector_frac = min_sector_frac)
+}
+
+filter_by_angular_coverage <- function(
+    plots, ctg, radius = 13, n_sectors = 8, min_frac = 0
+    ) 
+  {
+  
+  # for each plot, measure how evenly points are distributed around the center
+  # a value of 0 means at least one bin is empty -> data gap on one side
+  plots$min_sector_frac <- vapply(seq_len(nrow(plots)), function(i) {
+    co <- sf::st_coordinates(plots[i, ])
+    angular_sector_coverage(ctg, co[1], co[2],
+                            radius = radius,
+                            n_sectors = n_sectors)$min_sector_frac
+  }, numeric(1))
+  
+  plots[plots$min_sector_frac > min_frac, ]
+}
+
+bi_plots_1 <- filter_by_angular_coverage(bi_plots_1, ctg)
+bi_plots_2 <- filter_by_angular_coverage(bi_plots_2, ctg)
+bi_plots   <- filter_by_angular_coverage(bi_plots,   ctg)
+
+# write to disk
 sf::st_write(
   bi_plots_1[, c('kspnr', 'center_point_estimated', 'solution_status', 'measurement_date')],
   file.path(processed_data_dir, 'forest_inventory', 'bi_center_points_2023_24.gpkg'),
