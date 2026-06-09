@@ -1,7 +1,11 @@
 #-------------------------------------------------------------------------------
 # Name:         dat_prep.R
 # Description:  Preparation of RTK-remeasured forest inventory plots (BI)
-#               in the Solling region.
+#               in the Solling region. Reads and merges the 2023/24 and
+#               2025/26 campaigns, derives the RTK solution status,
+#               applies spatial filters, adds per-plot leaf-off / leaf-on
+#               CHM heights and their difference, and supports a manual
+#               filter for plots affected by tree fall.
 # Contact:      florian.franz@nw-fva.de
 #-------------------------------------------------------------------------------
 
@@ -220,6 +224,314 @@ bi_plots_1 <- filter_by_angular_coverage(bi_plots_1, ctg)
 bi_plots_2 <- filter_by_angular_coverage(bi_plots_2, ctg)
 bi_plots   <- filter_by_angular_coverage(bi_plots,   ctg)
 
+# 04.3. height difference filter (merged file only)
+# computes per-plot CHM height for leaf-off and leaf-on acquisitions
+# and stores their difference (leaf-off - leaf-on) as an attribute,
+# so plots affected by treefall or harvest can be identified later
+#-------------------------------------------------------------------------------
+
+pc_lon_path  <- file.path(raw_data_dir, 'pc_leafon_2023')
+pc_loff_path <- file.path(raw_data_dir, 'pc_leafoff_2024')
+
+year_lon  <- '2023'
+year_loff <- '2024'
+
+extract_plot_heights <- function(
+    pc_path,
+    plots,
+    year,
+    res = 0.5,
+    buffer_radius = 13)
+  {
+
+  # plot centre coordinates as regions of interest
+  coords <- sf::st_coordinates(plots)
+  xc <- coords[, 1]
+  yc <- coords[, 2]
+
+  # get all LAZ files from the folder, then keep only those of the
+  # requested acquisition year (year suffix in the file name)
+  laz_files <- list.files(pc_path, pattern = '\\.laz$', full.names = T)
+  laz_files <- laz_files[grepl(year, basename(laz_files))]
+  if (length(laz_files) == 0) {
+    stop(sprintf('No LAZ files matching year "%s" found in %s', year, pc_path))
+  }
+  cat(sprintf('  %d LAZ files match year %s\n', length(laz_files), year))
+
+  # reads and process only the buffered plot circles
+  reader <- lasR::reader_circles(xc = xc, yc = yc, r = buffer_radius)
+  chm_stage <- lasR::rasterize(res = res, operators = max(HAG))
+  na_fill <- lasR::focal(chm_stage, size = 3, fun = 'mean')
+  pipeline <- reader + chm_stage + na_fill
+
+  # execute pipeline on all relevant LAZ files at once
+  ans <- lasR::exec(
+    pipeline,
+    on = laz_files,
+    with = list(ncores = lasR::half_cores(), progress = T)
+  )
+
+  # the NA-filled CHM is the last stage of the pipeline
+  chm <- ans[[length(ans)]]
+
+  # set CRS of CHM to match plots
+  terra::crs(chm) <- sf::st_crs(plots)$wkt
+
+  # extract mean height within each plot (buffered to match the circles)
+  plots_buffered <- sf::st_buffer(plots, dist = buffer_radius)
+  plot_heights <- exactextractr::exact_extract(
+    chm,
+    plots_buffered,
+    fun = 'mean'
+  )
+
+  # convert list to vector
+  if (is.list(plot_heights)) {
+    plot_heights <- unlist(plot_heights)
+  }
+
+  list(plot_heights = plot_heights, chm = chm)
+}
+
+# extract per-plot mean heights from CHMs of both acquisitions
+cat('Extracting heights from leaf-off point cloud...\n')
+loff_result <- extract_plot_heights(pc_loff_path, bi_plots, year = year_loff)
+
+cat('Extracting heights from leaf-on point cloud...\n')
+lon_result  <- extract_plot_heights(pc_lon_path,  bi_plots, year = year_lon)
+
+heights_loff <- loff_result$plot_heights
+heights_lon  <- lon_result$plot_heights
+chm_loff <- loff_result$chm
+chm_lon  <- lon_result$chm
+
+# build merged dataset with height columns
+bi_plots_height_diff <- bi_plots
+bi_plots_height_diff$height_loff <- heights_loff
+bi_plots_height_diff$height_lon  <- heights_lon
+bi_plots_height_diff$height_diff <-
+  bi_plots_height_diff$height_loff - bi_plots_height_diff$height_lon
+
+# 04.4. manual filtering (merged file only)
+# inspects the height-difference distribution to detect ambiguous plots,
+# exports per-plot CHM crops and point cloud clips for ambiguous plots
+# visual inspection of the point clouds
+# confirmed tree-fall plots are filtered out
+#-------------------------------------------------------------------------------
+
+# buffer radius for plot circles
+pc_buffer_radius <- 13
+
+# summary statistics of the height differences
+diff_vals <- bi_plots_height_diff$height_diff[
+  !is.na(bi_plots_height_diff$height_diff)
+]
+cat('\nHeight difference (leaf-off - leaf-on) summary:\n')
+print(summary(diff_vals))
+cat(sprintf('n = %d plots (%d with non-NA difference)\n',
+            nrow(bi_plots_height_diff), length(diff_vals)))
+
+# density plot of the height differences
+density_plot <- ggplot2::ggplot(
+  data.frame(height_diff = diff_vals),
+  ggplot2::aes(x = height_diff)
+) +
+  ggplot2::geom_density(
+    fill = 'grey80',
+    colour = 'firebrick',
+    linewidth = 0.8,
+    alpha = 0.6
+  ) +
+  ggplot2::geom_vline(
+    xintercept = 0,
+    colour = 'black',
+    linewidth = 0.6
+  ) +
+  ggplot2::geom_vline(
+    xintercept = median(diff_vals),
+    linewidth = 0.8,
+    linetype = 'dashed'
+  ) +
+  ggplot2::labs(
+    title = 'Distribution of per-plot height differences',
+    subtitle = 'Solid line: zero    Dashed line: median',
+    x = NULL,
+    y = 'Density'
+  ) +
+  ggplot2::theme_minimal()
+
+print(density_plot)
+
+ggplot2::ggsave(
+  filename = file.path(output_dir, 'height_diff_distribution.pdf'),
+  plot = density_plot,
+  width = 9,
+  height = 6
+)
+
+# ambiguous height-difference range (leaf-off - leaf-on)
+# adjusted after inspecting the distribution plot above
+ambig_lower <- -5
+ambig_upper <- -2.5
+
+ambiguous_plots <- bi_plots_height_diff[
+  !is.na(bi_plots_height_diff$height_diff) &
+    bi_plots_height_diff$height_diff > ambig_lower &
+    bi_plots_height_diff$height_diff < ambig_upper,
+]
+cat(sprintf('%d plots in ambiguous height_diff range (%g, %g)\n',
+            nrow(ambiguous_plots), ambig_lower, ambig_upper))
+
+# output directories for per-plot CHM crops and point cloud clips
+plot_chm_out_dir <- file.path(processed_data_dir, 'cropped_chms_plots')
+plot_pc_out_dir  <- file.path(processed_data_dir, 'cropped_pcs_plots')
+
+# helper: write per-plot CHM crops to disk
+save_plot_chm_crops <- function(chm, plots, out_dir, name_suffix,
+                                buffer_radius = pc_buffer_radius,
+                                skip_existing = T) {
+
+  dir.create(out_dir, recursive = T, showWarnings = F)
+  plots_buffered <- sf::st_buffer(plots, dist = buffer_radius)
+  n_saved <- 0
+  n_skipped <- 0
+
+  for (i in seq_len(nrow(plots_buffered))) {
+    kspnr_val <- as.character(plots_buffered$kspnr[i])
+    out_file <- file.path(out_dir, sprintf('plot_%s_%s.tif', kspnr_val, name_suffix))
+
+    if (skip_existing && file.exists(out_file)) {
+      n_skipped <- n_skipped + 1
+      next
+    }
+
+    plot_vect <- terra::vect(plots_buffered[i, ])
+    chm_crop <- terra::crop(chm, plot_vect)
+    chm_mask <- terra::mask(chm_crop, plot_vect)
+    terra::writeRaster(chm_mask, out_file, overwrite = T)
+    n_saved <- n_saved + 1
+  }
+
+  cat(sprintf('CHM crop export (%s): saved %d, skipped existing %d (%s)\n',
+              name_suffix, n_saved, n_skipped, out_dir))
+}
+
+# helper: write per-plot point cloud clips to disk
+save_plot_pc_clips <- function(plots, pc_path, year, name_suffix, out_dir,
+                               buffer_radius = pc_buffer_radius,
+                               skip_existing = T) {
+
+  dir.create(out_dir, recursive = T, showWarnings = F)
+  laz_files <- list.files(pc_path, pattern = '\\.laz$', full.names = T)
+  laz_files <- laz_files[grepl(year, basename(laz_files))]
+  if (length(laz_files) == 0) {
+    stop(sprintf('No LAZ files matching year "%s" found in %s', year, pc_path))
+  }
+  ctg <- lidR::readLAScatalog(laz_files, progress = F)
+  n_saved <- 0
+  n_skipped <- 0
+
+  for (i in seq_len(nrow(plots))) {
+    kspnr_val <- as.character(plots$kspnr[i])
+    out_file <- file.path(out_dir, sprintf('plot_%s_%s.laz', kspnr_val, name_suffix))
+
+    if (skip_existing && file.exists(out_file)) {
+      n_skipped <- n_skipped + 1
+      next
+    }
+
+    coords <- sf::st_coordinates(plots[i, ])
+    las_clip <- lidR::clip_circle(ctg, coords[1, 1], coords[1, 2], buffer_radius)
+    lidR::writeLAS(las_clip, out_file)
+    n_saved <- n_saved + 1
+  }
+
+  cat(sprintf('PC clip export (%s): saved %d, skipped existing %d (%s)\n',
+              name_suffix, n_saved, n_skipped, out_dir))
+}
+
+# export CHM crops and PC clips for the ambiguous plots only
+if (nrow(ambiguous_plots) > 0) {
+  save_plot_chm_crops(chm_loff, ambiguous_plots, plot_chm_out_dir, 'leafoff')
+  save_plot_chm_crops(chm_lon,  ambiguous_plots, plot_chm_out_dir, 'leafon')
+  save_plot_pc_clips(ambiguous_plots, pc_loff_path, year_loff, 'leafoff', plot_pc_out_dir)
+  save_plot_pc_clips(ambiguous_plots, pc_lon_path,  year_lon,  'leafon',  plot_pc_out_dir)
+}
+
+# helper: read the buffered plot circle from all LAZ files of one acquisition
+read_plot_pc <- function(pc_path, year, xc, yc, r) {
+  laz_files <- list.files(pc_path, pattern = '\\.laz$', full.names = T)
+  laz_files <- laz_files[grepl(year, basename(laz_files))]
+  if (length(laz_files) == 0) {
+    stop(sprintf('No LAZ files matching year "%s" found in %s', year, pc_path))
+  }
+  ctg <- lidR::readLAScatalog(laz_files, progress = F)
+  lidR::clip_circle(ctg, xc, yc, r)
+}
+
+# show both point clouds in one window
+plot_sidebyside <- function(las1, las2, col_by = 'Z',
+                            palette = viridis::viridis, size = 2,
+                            top_down = T) {
+  rgl::open3d()
+  rgl::bg3d(color = 'black')
+  rgl::mfrow3d(1, 2, sharedMouse = T)
+  rgl::bg3d(color = 'black')
+  rgl::plot3d(
+    las1@data$X, las1@data$Y, las1@data$Z,
+    col = palette(100)[cut(las1@data[[col_by]], breaks = 100)],
+    size = size, decorate = F
+  )
+  if (top_down) rgl::view3d(theta = 0, phi = 0)
+  rgl::next3d()
+  rgl::bg3d(color = 'black')
+  rgl::plot3d(
+    las2@data$X, las2@data$Y, las2@data$Z,
+    col = palette(100)[cut(las2@data[[col_by]], breaks = 100)],
+    size = size, decorate = F
+  )
+  if (top_down) rgl::view3d(theta = 0, phi = 0)
+}
+
+# read + visualise one plot by its kspnr
+inspect_plot_by_kspnr <- function(kspnr_val) {
+  plot_idx <- which(bi_plots_height_diff$kspnr == kspnr_val)
+  if (length(plot_idx) == 0) {
+    stop(sprintf('No plot with kspnr = %s found.', as.character(kspnr_val)))
+  }
+  if (length(plot_idx) > 1) {
+    warning(sprintf('Multiple plots with kspnr = %s; using the first.',
+                    as.character(kspnr_val)))
+    plot_idx <- plot_idx[1]
+  }
+  plot_geom <- bi_plots_height_diff[plot_idx, ]
+  coords <- sf::st_coordinates(plot_geom)
+  cat(sprintf('kspnr %s (height_diff = %.2f m)\n',
+              as.character(kspnr_val), plot_geom$height_diff))
+
+  las_loff <- read_plot_pc(pc_loff_path, year_loff,
+                           coords[1, 1], coords[1, 2], pc_buffer_radius)
+  las_lon  <- read_plot_pc(pc_lon_path,  year_lon,
+                           coords[1, 1], coords[1, 2], pc_buffer_radius)
+  plot_sidebyside(las_lon, las_loff)
+
+  invisible(list(las_loff = las_loff, las_lon = las_lon))
+}
+
+# example: inspect a plot interactively (uncomment to run)
+# inspect_plot_by_kspnr(49013)
+
+# kspnr of plots to remove after visual inspection (fill in manually)
+plots_to_remove <- c(49013)
+
+bi_plots_filtered <- bi_plots_height_diff[
+  !bi_plots_height_diff$kspnr %in% plots_to_remove,
+]
+
+cat('Removed', length(plots_to_remove), 'plots after manual inspection\n')
+cat('Filtered merged dataset:',
+    nrow(bi_plots_filtered), '/', nrow(bi_plots_height_diff), 'plots retained\n')
+
 # write to disk
 sf::st_write(
   bi_plots_1[, c('kspnr', 'center_point_estimated', 'solution_status', 'measurement_date')],
@@ -236,5 +548,11 @@ sf::st_write(
 sf::st_write(
   bi_plots,
   file.path(processed_data_dir, 'forest_inventory', 'bi_center_points_merged.gpkg'),
+  delete_dsn = TRUE
+)
+
+sf::st_write(
+  bi_plots_filtered,
+  file.path(processed_data_dir, 'forest_inventory', 'bi_center_points_merged_filtered.gpkg'),
   delete_dsn = TRUE
 )
