@@ -6,11 +6,6 @@
 #               The tree volumes and AGB are aggregated per sample plot to obtain the growing stock volume (GSV) [m³/ha] and AGB [t/ha].
 #               Other attributes which are calculated per sample plot include tree density [n/ha],
 #               basal area [m³/ha], and quadratic mean diameter (QMD) [cm].
-#               The plots with the calculated forest attributes are clipped to the area of interest (AOI),
-#               which is the area covered by both leaf-off and leaf-on airborne laser scanning (ALS) datasets.
-#               Most of the plots were were remeasured with RTK-GNSS. Where available, the corrected coordinates of these plots are used.
-#               Plots with a defined vegetation height change between leaf-on and leaf-off that cannot be attributed to seasonal differences,
-#               but rather to treefall (harvest, natural disturbance), are removed.
 # Author:       Christoph Fischer, Georgia Reeves, Florian Franz
 # Contact:      christoph.fischer@nw-fva.de
 #               georgia.reeves@nw-fva.de
@@ -29,8 +24,6 @@ source('src/setup.R', local = TRUE)
 # input paths
 bi_path <- file.path(raw_data_dir, 'forest_inventory')
 bi_rtk_path <- file.path(processed_data_dir, 'forest_inventory')
-pc_lon_path <- file.path(raw_data_dir, 'pc_leafon_2023')
-pc_loff_path <- file.path(raw_data_dir, 'pc_leafoff_2024')
 
 # read forest inventory (BI) data
 bi_points <- read.table(
@@ -59,16 +52,11 @@ head(bi_trees)
 
 # read remeasured plots (RTK-GNSS)
 # already prepared in script dat_prep.R
-bi_plots_rtk <- sf::st_read(file.path(bi_rtk_path, 'bi_center_points_merged.gpkg'))
+bi_plots_rtk <- sf::st_read(
+  file.path(bi_rtk_path, 'bi_center_points_merged_filtered.gpkg')
+  )
 
 head(bi_plots_rtk)
-
-# read leaf-off point cloud extent
-ext_loff <- sf::st_read(
-  file.path(pc_loff_path, 'leafoff.vpc')
-)
-
-#ext_loff <- sf::st_transform(ext_loff, sf::st_crs(bi_plots))
 
 
 
@@ -406,7 +394,8 @@ plot_base_utm <- dplyr::left_join(
   plot_base_utm,
   sf::st_drop_geometry(
     bi_plots_rtk[, c('kspnr', 'center_point_estimated',
-                     'solution_status', 'measurement_date')]
+                     'solution_status', 'measurement_date',
+                     'height_loff', 'height_lon', 'height_diff')]
     ),
   by = 'kspnr'
 )
@@ -444,318 +433,67 @@ if (any(matching_plots)) {
 
 
 
-# 06: remove plots based on height differences between leaf-off and leaf-on
+# 05: build tree-level table and aggregate per sample plot
 #-------------------------------------------------------------------------------
 
-# define path for storing excluded plots
-excluded_plots_file <- file.path(
-  processed_data_dir, 'forest_inventory', 'excluded_plots_height_diff.csv'
+# keep only trees from the RTK plot domain
+plot_ids_rtk <- sf::st_drop_geometry(
+  remeasured_plots_rtk[, c('key', 'kspnr')]
 )
-plot_heights_file <- file.path(
-  processed_data_dir, 'forest_inventory', 'plot_heights_leafon_leafoff.csv'
-)
-
-if (is.null(remeasured_plots_non_rtk) || is.null(remeasured_plots_rtk)) {
-  stop('remeasured_plots_non_rtk and remeasured_plots_rtk must exist before section 06.')
-}
-
-# use RTK positions as reference for CHM-based quality filtering
-plots_ref <- remeasured_plots_rtk
-
-# export CHM crops per plot
-plot_chm_out_dir <- file.path(processed_data_dir, 'cropped_chms_plots')
-
-extract_plot_heights_chm <- function(
-  pc_path,
-  plots,
-  res = 0.5, 
-  buffer_radius = 13,
-  return_chm = F)
-  {
-  
-  # create buffered plots
-  plots_buffered <- sf::st_buffer(plots, dist = buffer_radius)
-  
-  # get all LAZ files from the path
-  laz_files <- list.files(pc_path, pattern = '\\.laz$', full.names = T)
-  
-  # process each file individually and collect CHMs
-  chm_list <- list()
-  
-  for (i in seq_along(laz_files)) {
-    
-    cat(sprintf('  Processing file %d/%d\n', i, length(laz_files)))
-    
-    # create fresh pipeline for each file
-    chm_stage <- lasR::rasterize(res = res, operators = max(HAG))
-    na_fill <- lasR::focal(chm_stage, size = 3, fun = 'mean')
-    pipeline <- chm_stage + na_fill
-    
-    # execute pipeline on single file
-    ans <- lasR::exec(
-      pipeline, 
-      on = laz_files[i],
-      with = list(ncores = lasR::half_cores(), progress = T)
-    )
-    
-    # store the NA-filled CHM (second element)
-    chm_list[[i]] <- ans[[2]]
-  }
-  
-  # merge all CHMs into one
-  if (length(chm_list) == 1) {
-    chm <- chm_list[[1]]
-  } else {
-    chm <- do.call(terra::merge, chm_list)
-  }
-  
-  # set CRS of CHM to match plots
-  terra::crs(chm) <- sf::st_crs(plots)$wkt
-  
-  # extract mean height within each plot
-  plot_heights <- exactextractr::exact_extract(
-    chm,
-    plots_buffered,
-    fun = 'mean'
-  )
-  
-  # convert list to vector
-  if (is.list(plot_heights)) {
-    plot_heights <- unlist(plot_heights)
-  }
-  
-  if (return_chm) {
-    return(list(plot_heights = plot_heights, chm = chm))
-  }
-  
-  return(plot_heights)
-}
-
-save_plot_chm_crops <- function(
-  chm,
-  plots,
-  out_dir,
-  name_suffix,
-  buffer_radius = 13,
-  skip_existing = T
-) {
-  
-  dir.create(out_dir, recursive = T, showWarnings = F)
-  plots_buffered <- sf::st_buffer(plots, dist = buffer_radius)
-  n_saved <- 0
-  n_skipped <- 0
-  
-  for (i in seq_len(nrow(plots_buffered))) {
-    kspnr_val <- as.character(plots_buffered$kspnr[i])
-    out_file <- file.path(out_dir, sprintf('plot_%s_%s.tif', kspnr_val, name_suffix))
-    
-    if (skip_existing && file.exists(out_file)) {
-      n_skipped <- n_skipped + 1
-      next
-    }
-    
-    plot_vect <- terra::vect(plots_buffered[i, ])
-    chm_crop <- terra::crop(chm, plot_vect)
-    chm_mask <- terra::mask(chm_crop, plot_vect)
-    terra::writeRaster(chm_mask, out_file, overwrite = T)
-    n_saved <- n_saved + 1
-  }
-  
-  cat(
-    'CHM crop export (', name_suffix, '): saved ', n_saved, 
-    ', skipped existing ', n_skipped, ' (folder: ', out_dir, ')\n',
-    sep = ''
-  )
-}
-
-add_height_columns <- function(plots, heights_df) {
-  idx <- match(plots$kspnr, heights_df$kspnr)
-  plots$height_loff <- heights_df$height_loff[idx]
-  plots$height_lon <- heights_df$height_lon[idx]
-  plots$height_diff <- heights_df$height_diff[idx]
-  plots
-}
-
-# check if the list of plots to exclude already exists
-if (file.exists(excluded_plots_file)) {
-  
-  cat('Loading previously identified plots to exclude...\n')
-  plots_to_exclude_df <- read.csv(excluded_plots_file, stringsAsFactors = F)
-  plots_to_exclude <- plots_to_exclude_df$kspnr
-  cat('Loaded', length(plots_to_exclude), 'plots to exclude\n')
-  
-  if (file.exists(plot_heights_file)) {
-    heights_df <- read.csv(plot_heights_file, stringsAsFactors = F)
-    remeasured_plots_rtk <- add_height_columns(remeasured_plots_rtk, heights_df)
-    remeasured_plots_non_rtk <- add_height_columns(remeasured_plots_non_rtk, heights_df)
-    plots_ref <- remeasured_plots_rtk
-    cat('Loaded height columns from', plot_heights_file, '\n')
-  } else {
-    cat('No saved plot heights file found. Height columns are not available in this run.\n')
-  }
-  
-} else {
-  
-  cat('Running CHM analysis to identify plots to exclude...\n')
-  
-  # extract heights from CHMs of both point cloud catalogs (leaf-off/-on)
-  cat('Extracting heights from leaf-off point cloud...\n')
-  loff_result <- extract_plot_heights_chm(
-    pc_loff_path,
-    plots_ref,
-    return_chm = T
-  )
-  
-  cat('Extracting heights from leaf-on point cloud...\n')
-  lon_result <- extract_plot_heights_chm(
-    pc_lon_path,
-    plots_ref,
-    return_chm = T
-  )
-  
-  heights_loff <- loff_result$plot_heights
-  heights_lon <- lon_result$plot_heights
-  save_plot_chm_crops(lon_result$chm, plots_ref, plot_chm_out_dir, 'leafon')
-  save_plot_chm_crops(loff_result$chm, plots_ref, plot_chm_out_dir, 'leafoff')
-  
-  # add heights to plots
-  plots_ref$height_loff <- heights_loff
-  plots_ref$height_lon <- heights_lon
-  
-  # calculate height difference (leaf-off - leaf-on)
-  plots_ref$height_diff <- 
-    plots_ref$height_loff - plots_ref$height_lon
-  
-  # persist plot heights for runs where excluded_plots_file already exists
-  heights_df <- data.frame(
-    kspnr = plots_ref$kspnr,
-    height_loff = plots_ref$height_loff,
-    height_lon = plots_ref$height_lon,
-    height_diff = plots_ref$height_diff
-  )
-  write.csv(heights_df, plot_heights_file, row.names = F)
-  cat('Saved plot heights to', plot_heights_file, '\n')
-  
-  # attach heights to both variants (RTK and non-RTK) by plot id
-  remeasured_plots_rtk <- add_height_columns(remeasured_plots_rtk, heights_df)
-  remeasured_plots_non_rtk <- add_height_columns(remeasured_plots_non_rtk, heights_df)
-  
-  # create filter based on height difference threshold
-  height_diff_threshold <- -10
-  valid_plots <- is.na(plots_ref$height_diff) |
-    plots_ref$height_diff > height_diff_threshold
-  table(valid_plots)
-  
-  # store the kspnr of plots to exclude
-  plots_to_exclude <- plots_ref$kspnr[!valid_plots]
-  
-  # save for future use
-  plots_to_exclude_df <- data.frame(kspnr = plots_to_exclude)
-  write.csv(plots_to_exclude_df, excluded_plots_file, row.names = F)
-  cat('Saved', length(plots_to_exclude), 'plots to exclude to', excluded_plots_file, '\n')
-  
-  # save non-filtered datasets (RTK and non-RTK)
-  sf::st_write(
-    remeasured_plots_rtk,
-    file.path(processed_data_dir, 'forest_inventory', 'inv_attr_plots_rtk_non_filtered.gpkg'),
-    delete_dsn = T,
-    quiet = T
-  )
-  sf::st_write(
-    remeasured_plots_non_rtk,
-    file.path(processed_data_dir, 'forest_inventory', 'inv_attr_plots_non_rtk_non_filtered.gpkg'),
-    delete_dsn = T,
-    quiet = T
-  )
-  
-}
-
-# apply the exclusion filter
-remeasured_plots_non_rtk_filtered <- remeasured_plots_non_rtk[
-  !remeasured_plots_non_rtk$kspnr %in% plots_to_exclude,
-]
-remeasured_plots_rtk_filtered <- remeasured_plots_rtk[
-  !remeasured_plots_rtk$kspnr %in% plots_to_exclude,
-]
-cat('Filtered datasets:\n')
-cat('Remeasured (non-RTK):', nrow(remeasured_plots_non_rtk_filtered), '/', nrow(remeasured_plots_non_rtk), '\n')
-cat('Remeasured (RTK):', nrow(remeasured_plots_rtk_filtered), '/', nrow(remeasured_plots_rtk), '\n')
-
-# manually remove plots with tree fall (at least one tree)
-# identified through visual CHM comparison
-# (not captured by height difference threshold)
-plots_tree_fall <- c(41400, 44026, 49013, 52866)
-remeasured_plots_non_rtk_filtered <- remeasured_plots_non_rtk_filtered[
-  !remeasured_plots_non_rtk_filtered$kspnr %in% plots_tree_fall,
-]
-remeasured_plots_rtk_filtered <- remeasured_plots_rtk_filtered[
-  !remeasured_plots_rtk_filtered$kspnr %in% plots_tree_fall,
-]
-cat('Removed', length(plots_tree_fall), 'plots with tree fall\n')
-
-
-
-# 07: build filtered tree-level table and aggregate per sample plot
-#-------------------------------------------------------------------------------
-
-# keep only trees from filtered RTK plot domain
-filtered_plot_ids <- sf::st_drop_geometry(
-  remeasured_plots_rtk_filtered[, c('key', 'kspnr')]
-)
-trees_rtk_filtered <- dplyr::semi_join(
+trees_rtk <- dplyr::semi_join(
   trees_base,
-  filtered_plot_ids,
+  plot_ids_rtk,
   by = c('key', 'kspnr')
 )
 
 # add final RTK coordinates and quality metadata to tree-level dataset
 plot_coords_rtk <- sf::st_drop_geometry(
   dplyr::mutate(
-    remeasured_plots_rtk_filtered,
-    rtk_x = sf::st_coordinates(remeasured_plots_rtk_filtered)[, 1],
-    rtk_y = sf::st_coordinates(remeasured_plots_rtk_filtered)[, 2]
+    remeasured_plots_rtk,
+    rtk_x = sf::st_coordinates(remeasured_plots_rtk)[, 1],
+    rtk_y = sf::st_coordinates(remeasured_plots_rtk)[, 2]
   )[, c(
     'key', 'kspnr', 'remeasured', 'center_point_estimated',
     'solution_status', 'measurement_date', 'height_loff', 'height_lon',
     'height_diff', 'rtk_x', 'rtk_y'
   )]
 )
-inv_attr_trees_rtk_filtered <- dplyr::left_join(
-  trees_rtk_filtered,
+inv_attr_trees_rtk <- dplyr::left_join(
+  trees_rtk,
   plot_coords_rtk,
   by = c('key', 'kspnr')
 )
 
 # add original (non-RTK) coordinates and metadata to tree-level dataset
-filtered_plot_ids_non_rtk <- sf::st_drop_geometry(
-  remeasured_plots_non_rtk_filtered[, c('key', 'kspnr')]
+plot_ids_non_rtk <- sf::st_drop_geometry(
+  remeasured_plots_non_rtk[, c('key', 'kspnr')]
 )
-trees_non_rtk_filtered <- dplyr::semi_join(
+trees_non_rtk <- dplyr::semi_join(
   trees_base,
-  filtered_plot_ids_non_rtk,
+  plot_ids_non_rtk,
   by = c('key', 'kspnr')
 )
 plot_coords_non_rtk <- sf::st_drop_geometry(
   dplyr::mutate(
-    remeasured_plots_non_rtk_filtered,
-    non_rtk_x = sf::st_coordinates(remeasured_plots_non_rtk_filtered)[, 1],
-    non_rtk_y = sf::st_coordinates(remeasured_plots_non_rtk_filtered)[, 2]
+    remeasured_plots_non_rtk,
+    non_rtk_x = sf::st_coordinates(remeasured_plots_non_rtk)[, 1],
+    non_rtk_y = sf::st_coordinates(remeasured_plots_non_rtk)[, 2]
   )[, c(
     'key', 'kspnr', 'remeasured', 'center_point_estimated',
     'solution_status', 'measurement_date', 'height_loff', 'height_lon',
     'height_diff', 'non_rtk_x', 'non_rtk_y'
   )]
 )
-inv_attr_trees_non_rtk_filtered <- dplyr::left_join(
-  trees_non_rtk_filtered,
+inv_attr_trees_non_rtk <- dplyr::left_join(
+  trees_non_rtk,
   plot_coords_non_rtk,
   by = c('key', 'kspnr')
 )
 
 # add column of leaf type
-unique(trees_rtk_filtered$bagr)
-trees_rtk_filtered$leaf_type <- ifelse(
-  trees_rtk_filtered$bagr %in% c('EI', 'ALN', 'BU', 'ALH'),
+unique(trees_rtk$bagr)
+trees_rtk$leaf_type <- ifelse(
+  trees_rtk$bagr %in% c('EI', 'ALN', 'BU', 'ALH'),
   'deciduous',
   'coniferous'
 )
@@ -763,7 +501,7 @@ trees_rtk_filtered$leaf_type <- ifelse(
 # group sums of volume, AGB,
 # and other forest inventory attributes like
 # tree density, basal area, and QMD
-trees_rtk_filtered <- trees_rtk_filtered %>%
+trees_rtk <- trees_rtk %>%
   dplyr::group_by(key, kspnr) %>%
   dplyr::mutate(
     total_vol_ha = sum(total_vol * nha),
@@ -789,41 +527,41 @@ trees_rtk_filtered <- trees_rtk_filtered %>%
     )) %>%
   dplyr::ungroup()
 
-# extract unique forest inventory variables for all filtered sample plots
+# extract unique forest inventory variables for all sample plots
 inv_attr_plots <- unique(
-  trees_rtk_filtered[, c(
+  trees_rtk[, c(
     'key', 'kspnr', 'abt', 'total_vol_ha', 'merch_vol_ha',
     'agb_ha', 'tree_density', 'basal_area_ha', 'dg', 'dominant_leaf_type'
   )]
 )
 inv_attr_plots[is.na(inv_attr_plots)] <- 0
 
-# attach aggregated attributes back to filtered plot geometries
-remeasured_plots_rtk_filtered <- dplyr::left_join(
-  remeasured_plots_rtk_filtered,
+# attach aggregated attributes back to plot geometries
+remeasured_plots_rtk <- dplyr::left_join(
+  remeasured_plots_rtk,
   inv_attr_plots,
   by = c('key', 'kspnr', 'abt')
 )
-remeasured_plots_non_rtk_filtered <- dplyr::left_join(
-  remeasured_plots_non_rtk_filtered,
+remeasured_plots_non_rtk <- dplyr::left_join(
+  remeasured_plots_non_rtk,
   inv_attr_plots,
   by = c('key', 'kspnr', 'abt')
 )
 
 # summary statistics
-summary(remeasured_plots_rtk_filtered)
+summary(remeasured_plots_rtk)
 summary_df <- as.data.frame(
-  do.call(cbind, lapply(remeasured_plots_rtk_filtered, summary))
+  do.call(cbind, lapply(remeasured_plots_rtk, summary))
 )
 write.csv(
   summary_df,
   file.path(
     processed_data_dir,
     'forest_inventory',
-    'summary_stats_inv_attr_plots_rtk_filtered.csv')
+    'summary_stats_inv_attr_plots_rtk.csv')
 )
-table(remeasured_plots_rtk_filtered$dominant_leaf_type)
-table_df <- as.data.frame(table(remeasured_plots_rtk_filtered$dominant_leaf_type))
+table(remeasured_plots_rtk$dominant_leaf_type)
+table_df <- as.data.frame(table(remeasured_plots_rtk$dominant_leaf_type))
 write.csv(
   table_df,
   file.path(
@@ -835,17 +573,17 @@ write.csv(
 
 # boxplots
 par(mfrow = c(2,3))
-boxplot(remeasured_plots_rtk_filtered$total_vol_ha)
-boxplot(remeasured_plots_rtk_filtered$merch_vol_ha)
-boxplot(remeasured_plots_rtk_filtered$agb_ha)
-boxplot(remeasured_plots_rtk_filtered$tree_density)
-boxplot(remeasured_plots_rtk_filtered$basal_area_ha)
-boxplot(remeasured_plots_rtk_filtered$dg)
+boxplot(remeasured_plots_rtk$total_vol_ha)
+boxplot(remeasured_plots_rtk$merch_vol_ha)
+boxplot(remeasured_plots_rtk$agb_ha)
+boxplot(remeasured_plots_rtk$tree_density)
+boxplot(remeasured_plots_rtk$basal_area_ha)
+boxplot(remeasured_plots_rtk$dg)
 par(mfrow = c(1,1))
 
 
 
-# 08: save BI plots with the forest inventory attributes per sample plot
+# 06: save BI plots with the forest inventory attributes per sample plot
 #-------------------------------------------------------------------------------
 
 out_path <- file.path(processed_data_dir, 'forest_inventory')
@@ -871,28 +609,23 @@ file_formats <- list(
 # define datasets to save
 datasets <- list(
   list(
-    name = 'inv_attr_plots',
-    data = remeasured_plots_rtk_filtered,
+    name = 'inv_attr_plots_rtk',
+    data = remeasured_plots_rtk,
     drop_geom = T
   ),
   list(
     name = 'inv_attr_plots_non_rtk',
-    data = remeasured_plots_non_rtk_filtered,
+    data = remeasured_plots_non_rtk,
     drop_geom = T
   ),
   list(
-    name = 'inv_attr_plots_rtk',
-    data = remeasured_plots_rtk_filtered,
-    drop_geom = T
-  ),
-  list(
-    name = 'inv_attr_trees_rtk_filtered',
-    data = inv_attr_trees_rtk_filtered,
+    name = 'inv_attr_trees_rtk',
+    data = inv_attr_trees_rtk,
     drop_geom = F
   ),
   list(
-    name = 'inv_attr_trees_non_rtk_filtered',
-    data = inv_attr_trees_non_rtk_filtered,
+    name = 'inv_attr_trees_non_rtk',
+    data = inv_attr_trees_non_rtk,
     drop_geom = F
   )
 )
