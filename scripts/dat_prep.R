@@ -4,8 +4,8 @@
 #               in the Solling region. Reads and merges the 2023/24 and
 #               2025/26 campaigns, derives the RTK solution status,
 #               applies spatial filters, adds per-plot leaf-off / leaf-on
-#               CHM heights and their difference, and supports a manual
-#               filter for plots affected by tree fall.
+#               CHM heights and their difference, and supports an automatic and
+#               manual filter for plots affected by tree fall.
 # Contact:      florian.franz@nw-fva.de
 #-------------------------------------------------------------------------------
 
@@ -137,180 +137,239 @@ bi_plots <- rbind(
 
 
 
-# 04 - spatial filtering
+# 04 - spatial filtering and height difference calculation
 #-------------------------------------------------------------------------------
 
-# 04.1. extent filter
-#---------------------
-
-# read leaf-off point cloud extent
-ext_loff <- sf::st_read(
-  file.path(raw_data_dir, 'pc_leafoff_2024', 'leafoff.vpc')
-)
-
-ext_loff <- sf::st_transform(ext_loff, sf::st_crs(bi_plots))
-
-# keep only plots whose 13 m buffered footprint lies fully within the extent
-ext_geom <- sf::st_union(sf::st_buffer(ext_loff, 0.5))
-
-filter_within_extent <- function(plots, ext, radius = 13) {
-  buf <- sf::st_buffer(plots, radius)
-  plots[lengths(sf::st_within(buf, ext)) > 0, ]
-}
-
-bi_plots_1 <- filter_within_extent(bi_plots_1, ext_geom)
-bi_plots_2 <- filter_within_extent(bi_plots_2, ext_geom)
-bi_plots   <- filter_within_extent(bi_plots,   ext_geom)
-
-# 04.2. angular sector coverage filter
-# drops plots whose point cloud has a large empty bin (data gap on one side),
-# even though the plot lies inside the nominal extent
-#-------------------------------------------------------------------------------
-
-laz_dir <- file.path(raw_data_dir, 'pc_leafoff_2024')
-
-laz_files_2024 <- list.files(
-  laz_dir, pattern = "_2024\\.laz$", full.names = T
-)
-
-ctg <- lidR::readLAScatalog(laz_files_2024)
-
-angular_sector_coverage <- function(ctg, x, y, radius = 13, n_sectors = 8) {
-  
-  # clip circular plot from the catalog around (x, y) with the given radius
-  las <- lidR::clip_circle(ctg, x, y, radius)
-  if (lidR::is.empty(las)) {
-    return(list(min_sector_frac = 0))
-  }
-  
-  # total number of points inside the circle
-  n_pts <- lidR::npoints(las)
-  
-  # angle of each point relative to the plot center, in radians (-pi..pi)
-  ang <- atan2(las$Y - y, las$X - x)
-  
-  # assign each point to one of n_sectors equal-width angular bins
-  sec <- cut(ang, breaks = seq(-pi, pi, length.out = n_sectors + 1),
-             include.lowest = T)
-  
-  # count how many points fell into each sector
-  counts <- as.integer(table(sec))
-  
-  # ratio of the emptiest sector to the expected share under uniform coverage
-  # (1.0 = perfectly uniform, 0 = at least one bin is completely empty)
-  min_sector_frac <- min(counts) / (n_pts / n_sectors)
-  
-  list(min_sector_frac = min_sector_frac)
-}
-
-filter_by_angular_coverage <- function(
-    plots, ctg, radius = 13, n_sectors = 8, min_frac = 0
-    ) 
-  {
-  
-  # for each plot, measure how evenly points are distributed around the center
-  # a value of 0 means at least one bin is empty -> data gap on one side
-  plots$min_sector_frac <- vapply(seq_len(nrow(plots)), function(i) {
-    co <- sf::st_coordinates(plots[i, ])
-    angular_sector_coverage(ctg, co[1], co[2],
-                            radius = radius,
-                            n_sectors = n_sectors)$min_sector_frac
-  }, numeric(1))
-  
-  plots[plots$min_sector_frac > min_frac, ]
-}
-
-bi_plots_1 <- filter_by_angular_coverage(bi_plots_1, ctg)
-bi_plots_2 <- filter_by_angular_coverage(bi_plots_2, ctg)
-bi_plots   <- filter_by_angular_coverage(bi_plots,   ctg)
-
-# 04.3. height difference filter (merged file only)
-# computes per-plot CHM height for leaf-off and leaf-on acquisitions
-# and stores their difference (leaf-off - leaf-on) as an attribute,
-# so plots affected by treefall or harvest can be identified later
-#-------------------------------------------------------------------------------
-
+# point cloud paths and acquisition years (leaf-on = 2023, leaf-off = 2024);
+# defined here as they are also used by the inspection helpers in 04.4
 pc_lon_path  <- file.path(raw_data_dir, 'pc_leafon_2023')
 pc_loff_path <- file.path(raw_data_dir, 'pc_leafoff_2024')
 
 year_lon  <- '2023'
 year_loff <- '2024'
 
-extract_plot_heights <- function(
-    pc_path,
-    plots,
-    year,
-    res = 0.5,
-    buffer_radius = 13)
-  {
+# cache: the merged plots after the extent filter (04.1) and the angular sector
+# coverage filter (04.2), carrying per-plot leaf-off/leaf-on CHM heights and
+# their difference (04.3). this is the same bi_center_points_merged.gpkg written
+# on a full run; when it (and the CHMs) exist, all the expensive filtering and
+# extraction below is skipped and the cached results are loaded instead, so the
+# manual filtering in 04.4 can be iterated without rerunning everything.
+# delete these files to force a rebuild (e.g. after changing the input plots).
+merged_file <- file.path(processed_data_dir, 'forest_inventory',
+                         'bi_center_points_merged.gpkg')
+chm_loff_file <- file.path(processed_data_dir, 'forest_inventory', 'chm_loff_2024.tif')
+chm_lon_file  <- file.path(processed_data_dir, 'forest_inventory', 'chm_lon_2023.tif')
 
-  # plot centre coordinates as regions of interest
-  coords <- sf::st_coordinates(plots)
-  xc <- coords[, 1]
-  yc <- coords[, 2]
+if (file.exists(merged_file)) {
 
-  # get all LAZ files from the folder, then keep only those of the
-  # requested acquisition year (year suffix in the file name)
-  laz_files <- list.files(pc_path, pattern = '\\.laz$', full.names = T)
-  laz_files <- laz_files[grepl(year, basename(laz_files))]
-  if (length(laz_files) == 0) {
-    stop(sprintf('No LAZ files matching year "%s" found in %s', year, pc_path))
-  }
-  cat(sprintf('  %d LAZ files match year %s\n', length(laz_files), year))
+  # load cached results
+  cat('Loading cached filtered plots with height differences from disk...\n')
+  bi_plots_height_diff <- sf::st_read(merged_file, quiet = T)
+  chm_loff <- terra::rast(chm_loff_file)
+  chm_lon  <- terra::rast(chm_lon_file)
 
-  # reads and process only the buffered plot circles
-  reader <- lasR::reader_circles(xc = xc, yc = yc, r = buffer_radius)
-  chm_stage <- lasR::rasterize(res = res, operators = max(HAG))
-  na_fill <- lasR::focal(chm_stage, size = 3, fun = 'mean')
-  pipeline <- reader + chm_stage + na_fill
+} else {
 
-  # execute pipeline on all relevant LAZ files at once
-  ans <- lasR::exec(
-    pipeline,
-    on = laz_files,
-    with = list(ncores = lasR::half_cores(), progress = T)
+  cat('No cache found, running the full spatial filtering and extraction...\n')
+
+  # 04.1. extent filter
+  #---------------------
+
+  cat('Extent filter: keeping plots inside the leaf-off footprint...\n')
+
+  # read leaf-off point cloud extent
+  ext_loff <- sf::st_read(
+    file.path(raw_data_dir, 'pc_leafoff_2024', 'leafoff.vpc')
   )
 
-  # the NA-filled CHM is the last stage of the pipeline
-  chm <- ans[[length(ans)]]
+  ext_loff <- sf::st_transform(ext_loff, sf::st_crs(bi_plots))
 
-  # set CRS of CHM to match plots
-  terra::crs(chm) <- sf::st_crs(plots)$wkt
+  # keep only plots whose 13 m buffered footprint lies fully within the extent
+  ext_geom <- sf::st_union(sf::st_buffer(ext_loff, 0.5))
 
-  # extract mean height within each plot (buffered to match the circles)
-  plots_buffered <- sf::st_buffer(plots, dist = buffer_radius)
-  plot_heights <- exactextractr::exact_extract(
-    chm,
-    plots_buffered,
-    fun = 'mean'
-  )
-
-  # convert list to vector
-  if (is.list(plot_heights)) {
-    plot_heights <- unlist(plot_heights)
+  filter_within_extent <- function(plots, ext, radius = 13) {
+    buf <- sf::st_buffer(plots, radius)
+    plots[lengths(sf::st_within(buf, ext)) > 0, ]
   }
 
-  list(plot_heights = plot_heights, chm = chm)
+  n_before_extent <- nrow(bi_plots)
+  bi_plots_1 <- filter_within_extent(bi_plots_1, ext_geom)
+  bi_plots_2 <- filter_within_extent(bi_plots_2, ext_geom)
+  bi_plots   <- filter_within_extent(bi_plots,   ext_geom)
+  cat(sprintf('  merged: %d -> %d plots (%d dropped outside extent)\n',
+              n_before_extent, nrow(bi_plots), n_before_extent - nrow(bi_plots)))
+
+  # 04.2. angular sector coverage filter
+  # drops plots whose point cloud has a large empty bin (data gap on one side),
+  # even though the plot lies inside the nominal extent
+  #-----------------------------------------------------------------------------
+
+  cat('Angular sector coverage filter: scanning each plot circle...\n')
+
+  laz_dir <- file.path(raw_data_dir, 'pc_leafoff_2024')
+
+  laz_files_2024 <- list.files(
+    laz_dir, pattern = "_2024\\.laz$", full.names = T
+  )
+
+  ctg <- lidR::readLAScatalog(laz_files_2024)
+
+  angular_sector_coverage <- function(ctg, x, y, radius = 13, n_sectors = 8) {
+
+    # clip circular plot from the catalog around (x, y) with the given radius
+    las <- lidR::clip_circle(ctg, x, y, radius)
+    if (lidR::is.empty(las)) {
+      return(list(min_sector_frac = 0))
+    }
+
+    # total number of points inside the circle
+    n_pts <- lidR::npoints(las)
+
+    # angle of each point relative to the plot center, in radians (-pi..pi)
+    ang <- atan2(las$Y - y, las$X - x)
+
+    # assign each point to one of n_sectors equal-width angular bins
+    sec <- cut(ang, breaks = seq(-pi, pi, length.out = n_sectors + 1),
+               include.lowest = T)
+
+    # count how many points fell into each sector
+    counts <- as.integer(table(sec))
+
+    # ratio of the emptiest sector to the expected share under uniform coverage
+    # (1.0 = perfectly uniform, 0 = at least one bin is completely empty)
+    min_sector_frac <- min(counts) / (n_pts / n_sectors)
+
+    list(min_sector_frac = min_sector_frac)
+  }
+
+  filter_by_angular_coverage <- function(
+      plots, ctg, radius = 13, n_sectors = 8, min_frac = 0
+      )
+    {
+
+    # for each plot, measure how evenly points are distributed around the center
+    # a value of 0 means at least one bin is empty -> data gap on one side
+    plots$min_sector_frac <- vapply(seq_len(nrow(plots)), function(i) {
+      co <- sf::st_coordinates(plots[i, ])
+      angular_sector_coverage(ctg, co[1], co[2],
+                              radius = radius,
+                              n_sectors = n_sectors)$min_sector_frac
+    }, numeric(1))
+
+    plots[plots$min_sector_frac > min_frac, ]
+  }
+
+  n_before_coverage <- nrow(bi_plots)
+  bi_plots_1 <- filter_by_angular_coverage(bi_plots_1, ctg)
+  bi_plots_2 <- filter_by_angular_coverage(bi_plots_2, ctg)
+  bi_plots   <- filter_by_angular_coverage(bi_plots,   ctg)
+  cat(sprintf('  merged: %d -> %d plots (%d dropped for coverage gaps)\n',
+              n_before_coverage, nrow(bi_plots),
+              n_before_coverage - nrow(bi_plots)))
+
+  # 04.3. height difference calculation (merged file only)
+  # computes per-plot CHM height for leaf-off and leaf-on acquisitions
+  # and stores their difference (leaf-off - leaf-on) as an attribute,
+  # so plots affected by treefall or harvest can be identified later
+  #-----------------------------------------------------------------------------
+
+  extract_plot_heights <- function(
+      pc_path,
+      plots,
+      year,
+      res = 0.5,
+      buffer_radius = 13)
+    {
+
+    # plot centre coordinates as regions of interest
+    coords <- sf::st_coordinates(plots)
+    xc <- coords[, 1]
+    yc <- coords[, 2]
+
+    # get all LAZ files from the folder, then keep only those of the
+    # requested acquisition year (year suffix in the file name)
+    laz_files <- list.files(pc_path, pattern = '\\.laz$', full.names = T)
+    laz_files <- laz_files[grepl(year, basename(laz_files))]
+    if (length(laz_files) == 0) {
+      stop(sprintf('No LAZ files matching year "%s" found in %s', year, pc_path))
+    }
+    cat(sprintf('  %d LAZ files match year %s\n', length(laz_files), year))
+
+    # reads and process only the buffered plot circles
+    reader <- lasR::reader_circles(xc = xc, yc = yc, r = buffer_radius)
+    chm_stage <- lasR::rasterize(res = res, operators = max(HAG))
+    na_fill <- lasR::focal(chm_stage, size = 3, fun = 'mean')
+    pipeline <- reader + chm_stage + na_fill
+
+    # execute pipeline on all relevant LAZ files at once
+    ans <- lasR::exec(
+      pipeline,
+      on = laz_files,
+      with = list(ncores = lasR::half_cores(), progress = T)
+    )
+
+    # the NA-filled CHM is the last stage of the pipeline
+    chm <- ans[[length(ans)]]
+
+    # set CRS of CHM to match plots
+    terra::crs(chm) <- sf::st_crs(plots)$wkt
+
+    # extract mean height within each plot (buffered to match the circles)
+    plots_buffered <- sf::st_buffer(plots, dist = buffer_radius)
+    plot_heights <- exactextractr::exact_extract(
+      chm,
+      plots_buffered,
+      fun = 'mean'
+    )
+
+    # convert list to vector
+    if (is.list(plot_heights)) {
+      plot_heights <- unlist(plot_heights)
+    }
+
+    list(plot_heights = plot_heights, chm = chm)
+  }
+
+  # extract per-plot mean heights from CHMs of both acquisitions
+  cat('Height difference: extracting CHM heights for both acquisitions...\n')
+  cat('Extracting heights from leaf-off point cloud...\n')
+  loff_result <- extract_plot_heights(pc_loff_path, bi_plots, year = year_loff)
+
+  cat('Extracting heights from leaf-on point cloud...\n')
+  lon_result  <- extract_plot_heights(pc_lon_path,  bi_plots, year = year_lon)
+
+  heights_loff <- loff_result$plot_heights
+  heights_lon  <- lon_result$plot_heights
+  chm_loff <- loff_result$chm
+  chm_lon  <- lon_result$chm
+
+  # build merged dataset with height columns
+  bi_plots_height_diff <- bi_plots
+  bi_plots_height_diff$height_loff <- heights_loff
+  bi_plots_height_diff$height_lon  <- heights_lon
+  bi_plots_height_diff$height_diff <-
+    bi_plots_height_diff$height_loff - bi_plots_height_diff$height_lon
+
+  # write the merged dataset (with height columns) and the CHMs to disk;
+  # the merged file doubles as the cache loaded on subsequent runs
+  cat('Writing merged dataset and CHMs to disk...\n')
+  sf::st_write(bi_plots_height_diff, merged_file, delete_dsn = T)
+  terra::writeRaster(chm_loff, chm_loff_file, overwrite = T)
+  terra::writeRaster(chm_lon,  chm_lon_file,  overwrite = T)
+
+  # write the per-campaign plot outputs (products of 04.1-04.3, independent of
+  # the 04.4 filtering below; only (re)written on a full run)
+  sf::st_write(
+    bi_plots_1[, c('kspnr', 'center_point_estimated', 'solution_status', 'measurement_date')],
+    file.path(processed_data_dir, 'forest_inventory', 'bi_center_points_2023_24.gpkg'),
+    delete_dsn = T
+  )
+  sf::st_write(
+    bi_plots_2[, c('kspnr', 'center_point_estimated', 'solution_status', 'measurement_date')],
+    file.path(processed_data_dir, 'forest_inventory', 'bi_center_points_2025_26.gpkg'),
+    delete_dsn = T
+  )
 }
-
-# extract per-plot mean heights from CHMs of both acquisitions
-cat('Extracting heights from leaf-off point cloud...\n')
-loff_result <- extract_plot_heights(pc_loff_path, bi_plots, year = year_loff)
-
-cat('Extracting heights from leaf-on point cloud...\n')
-lon_result  <- extract_plot_heights(pc_lon_path,  bi_plots, year = year_lon)
-
-heights_loff <- loff_result$plot_heights
-heights_lon  <- lon_result$plot_heights
-chm_loff <- loff_result$chm
-chm_lon  <- lon_result$chm
-
-# build merged dataset with height columns
-bi_plots_height_diff <- bi_plots
-bi_plots_height_diff$height_loff <- heights_loff
-bi_plots_height_diff$height_lon  <- heights_lon
-bi_plots_height_diff$height_diff <-
-  bi_plots_height_diff$height_loff - bi_plots_height_diff$height_lon
 
 # 04.4. manual filtering (merged file only)
 # inspects the height-difference distribution to detect ambiguous plots,
@@ -368,6 +427,18 @@ ggplot2::ggsave(
   width = 9,
   height = 6
 )
+
+# automatically flag plots with a large leaf-off / leaf-on height difference
+# (|height_diff| > 5 m), indicating treefall or harvest between acquisitions;
+# the threshold was chosen based on the distribution above
+height_diff_threshold <- 5
+plots_to_remove_auto <- bi_plots_height_diff$kspnr[
+  !is.na(bi_plots_height_diff$height_diff) &
+    abs(bi_plots_height_diff$height_diff) > height_diff_threshold
+]
+cat(sprintf('%d plots exceed the height_diff threshold of %g m: %s\n',
+            length(plots_to_remove_auto), height_diff_threshold,
+            paste(plots_to_remove_auto, collapse = ', ')))
 
 # ambiguous height-difference range (leaf-off - leaf-on)
 # adjusted after inspecting the distribution plot above
@@ -522,37 +593,25 @@ inspect_plot_by_kspnr <- function(kspnr_val) {
 # inspect_plot_by_kspnr(49013)
 
 # kspnr of plots to remove after visual inspection (fill in manually)
-plots_to_remove <- c(49013)
+plots_to_remove_manual <- c(49013)
+
+# combine the automatic height_diff threshold removals (see section above)
+# with the manually confirmed plots
+plots_to_remove <- union(plots_to_remove_auto, plots_to_remove_manual)
 
 bi_plots_filtered <- bi_plots_height_diff[
   !bi_plots_height_diff$kspnr %in% plots_to_remove,
 ]
 
-cat('Removed', length(plots_to_remove), 'plots after manual inspection\n')
+cat('Removed', length(plots_to_remove),
+    'plots total (height_diff threshold + manual inspection)\n')
 cat('Filtered merged dataset:',
     nrow(bi_plots_filtered), '/', nrow(bi_plots_height_diff), 'plots retained\n')
 
-# write to disk
-sf::st_write(
-  bi_plots_1[, c('kspnr', 'center_point_estimated', 'solution_status', 'measurement_date')],
-  file.path(processed_data_dir, 'forest_inventory', 'bi_center_points_2023_24.gpkg'),
-  delete_dsn = TRUE
-)
-
-sf::st_write(
-  bi_plots_2[, c('kspnr', 'center_point_estimated', 'solution_status', 'measurement_date')],
-  file.path(processed_data_dir, 'forest_inventory', 'bi_center_points_2025_26.gpkg'),
-  delete_dsn = TRUE
-)
-
-sf::st_write(
-  bi_plots,
-  file.path(processed_data_dir, 'forest_inventory', 'bi_center_points_merged.gpkg'),
-  delete_dsn = TRUE
-)
-
+# write the final filtered dataset to disk (depends on the 04.4 filtering;
+# the other derived outputs are written in section 04 on a full run)
 sf::st_write(
   bi_plots_filtered,
   file.path(processed_data_dir, 'forest_inventory', 'bi_center_points_merged_filtered.gpkg'),
-  delete_dsn = TRUE
+  delete_dsn = T
 )
