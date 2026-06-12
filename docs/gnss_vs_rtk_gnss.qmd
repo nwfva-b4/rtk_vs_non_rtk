@@ -1,6 +1,6 @@
 ---
-title: "GNSS vs. RTK-GNSS Positioning of Forest Inventory Plots"
-author: "Florian Franz"
+title: 'GNSS vs. RTK-GNSS Positioning of Forest Inventory Plots'
+author: 'Florian Franz'
 format:
   html:
     toc: true
@@ -27,6 +27,8 @@ proj_root <- if (file.exists('src/setup.R')) '.' else '..'
 knitr::opts_knit$set(root.dir = normalizePath(proj_root))
 xfun::in_dir(proj_root, source('src/setup.R', local = TRUE))
 ```
+
+### Data: Forest Inventory Plots
 
 In Germany, forest management falls under the responsibility of the individual federal states. In Lower Saxony, the state forest service (Niedersächsische Landesforsten) monitors forest resources through permanent inventory plots (Betriebsinventur, BI) surveyed at 10-year intervals. The plot centers were originally positioned using standard GNSS. In the Solling region, a low mountain range in southern Lower Saxony, a subset of these plots (n = 61) was remeasured using RTK-GNSS during December 2023 and January 2024. A second remeasurement campaign covering additional plots (n = 118) was carried out from December 2025 to March 2026.
 
@@ -55,14 +57,14 @@ bi_plots <- st_read(
 ```{r}
 #| label: fig-plot-map-campaigns
 #| echo: false
-#| fig-cap: "Distribution of RTK-remeasured forest inventory plots in the Solling region."
+#| fig-cap: 'Distribution of RTK-remeasured forest inventory plots in the Solling region.'
 bi_plots_1$campaign <- '2023/24'
 bi_plots_2$campaign <- '2025/26'
 bi_all <- rbind(bi_plots_1[, 'campaign'], bi_plots_2[, 'campaign'])
 mapview::mapview(bi_all, zcol = 'campaign', layer.name = 'Campaign')
 ```
 
-### Per-campaign details
+#### Per-campaign details
 
 For the first campaign, a [Trimble R2 GNSS receiver](https://utilities.trimble.com/de-de/products/trimble-r2) was used, while for the second campaign, an [Emlid Reach RS3](https://eu.store.emlid.com/de-de/products/reach-rs3) was used. Both are multiband RTK-GNSS receivers. The RTK receiver reports a solution status for each measurement. A *fix* solution indicates that the carrier-phase ambiguities were resolved, which corresponds to centimeter-level accuracy. A *float* solution means that the ambiguities were not fully resolved, leading to lower accuracy in the range of decimeters to meters. A *single* solution indicates that no RTK correction was available and the position is based on standalone GNSS, with errors typically in the range of several meters.
 
@@ -73,7 +75,7 @@ For the first campaign, two plots were recorded with a *single* solution. They w
 ```{r}
 #| label: tbl-solution-status-1
 #| echo: false
-#| tbl-cap: "Campaign 1 (2023/24)"
+#| tbl-cap: 'Campaign 1 (2023/24)'
 bi_plots_1 %>%
   sf::st_drop_geometry() %>%
   dplyr::count(solution_status) %>%
@@ -84,7 +86,7 @@ bi_plots_1 %>%
 ```{r}
 #| label: tbl-solution-status-2
 #| echo: false
-#| tbl-cap: "Campaign 2 (2025/26)"
+#| tbl-cap: 'Campaign 2 (2025/26)'
 bi_plots_2 %>%
   sf::st_drop_geometry() %>%
   dplyr::count(solution_status) %>%
@@ -98,14 +100,14 @@ bi_plots_2 %>%
 ```{r}
 #| label: fig-solution-status-map-1
 #| echo: false
-#| fig-cap: "Solution status — Campaign 1 (2023/24)"
+#| fig-cap: 'Solution status — Campaign 1 (2023/24)'
 mapview::mapview(bi_plots_1, zcol = 'solution_status', layer.name = 'Solution Status')
 ```
 
 ```{r}
 #| label: fig-solution-status-map-2
 #| echo: false
-#| fig-cap: "Solution status — Campaign 2 (2025/26)"
+#| fig-cap: 'Solution status — Campaign 2 (2025/26)'
 mapview::mapview(bi_plots_2, zcol = 'solution_status', layer.name = 'Solution Status')
 ```
 
@@ -118,7 +120,7 @@ The center of each inventory plot is physically marked with an iron bar in the g
 ```{r}
 #| label: tbl-estimated-1
 #| echo: false
-#| tbl-cap: "Estimated center points — Campaign 1 (2023/24)"
+#| tbl-cap: 'Estimated center points — Campaign 1 (2023/24)'
 bi_plots_1 %>%
   sf::st_drop_geometry() %>%
   dplyr::count(center_point_estimated) %>%
@@ -129,7 +131,7 @@ bi_plots_1 %>%
 ```{r}
 #| label: tbl-estimated-2
 #| echo: false
-#| tbl-cap: "Estimated center points — Campaign 2 (2025/26)"
+#| tbl-cap: 'Estimated center points — Campaign 2 (2025/26)'
 bi_plots_2 %>%
   sf::st_drop_geometry() %>%
   dplyr::count(center_point_estimated) %>%
@@ -144,20 +146,20 @@ bi_plots_2 %>%
 ```{r}
 #| label: fig-estimated-map-1
 #| echo: false
-#| fig-cap: "Estimated center points — Campaign 1 (2023/24)"
+#| fig-cap: 'Estimated center points — Campaign 1 (2023/24)'
 mapview::mapview(bi_plots_1, zcol = 'center_point_estimated', layer.name = 'Estimated Center Point')
 ```
 
 ```{r}
 #| label: fig-estimated-map-2
 #| echo: false
-#| fig-cap: "Estimated center points — Campaign 2 (2025/26)"
+#| fig-cap: 'Estimated center points — Campaign 2 (2025/26)'
 mapview::mapview(bi_plots_2, zcol = 'center_point_estimated', layer.name = 'Estimated Center Point')
 ```
 
 :::
 
-### Combined overview
+#### Combined overview
 
 Combining both campaigns results in a **total of 179 remeasured plots** covering an area of approximately 20 km² in the Solling region.
 
@@ -200,6 +202,84 @@ mapview::mapview(bi_combined, zcol = 'campaign', layer.name = 'Campaign') +
   mapview::mapview(bi_combined, zcol = 'solution_status', layer.name = 'Solution Status', hide = TRUE) +
   mapview::mapview(bi_combined, zcol = 'center_point_estimated', layer.name = 'Estimated Center Point', hide = TRUE)
 ```
+
+### Data: Airborne Laser Scanning
+
+For the same area, two airborne laser scanning (ALS) datasets are available. The first was flown on 4/5 September 2023, when the trees were still in leaf (leaf-on conditions), and the second on 27 March 2024, after the leaves had fallen (leaf-off conditions). Both were flown with comparable settings in terms of pulse rate, flight altitude and speed, and scan angle. Although these differences in settings are already small, the two datasets were made even more similar through pre-processing. Both were thinned to a common pulse density of 20 pulses/m², and points with a scan angle larger than 20° were removed. This keeps the two datasets as comparable as possible, so that the main difference between them is the state of the canopy rather than the sensor setup.
+
+### Coordinate deviation
+
+Because the same plots are available both with their original GNSS coordinates and with the RTK-corrected coordinates, the effect of the correction can be quantified directly as the shift between the two positions. For each plot, the RTK-corrected center is compared with the original GNSS center, and the offset is expressed both per axis (east–west and north–south) and as the Euclidean distance between the two points.
+
+```{r}
+#| label: deviation-data
+#| include: false
+# read unfiltered plot dataset
+inv_attr_plots_rtk <- st_read(
+  file.path(processed_data_dir, 'forest_inventory', 'inv_attr_plots_rtk_unfiltered.gpkg'),
+  quiet = T
+)
+inv_attr_plots_non_rtk <- st_read(
+  file.path(processed_data_dir, 'forest_inventory', 'inv_attr_plots_non_rtk_unfiltered.gpkg'),
+  quiet = T
+)
+
+# extract coordinates from both datasets (RTK and original GNSS)
+coords_rtk     <- sf::st_coordinates(inv_attr_plots_rtk)
+coords_non_rtk <- sf::st_coordinates(inv_attr_plots_non_rtk)
+
+coord_df_rtk <- data.frame(
+  kspnr = inv_attr_plots_rtk$kspnr,
+  x_rtk = coords_rtk[, 1], y_rtk = coords_rtk[, 2]
+)
+coord_df_non_rtk <- data.frame(
+  kspnr = inv_attr_plots_non_rtk$kspnr,
+  x_non_rtk = coords_non_rtk[, 1], y_non_rtk = coords_non_rtk[, 2]
+)
+
+# merge by plot id and compute per-axis and euclidean deviations (RTK - GNSS)
+coord_deviation_df <- merge(coord_df_non_rtk, coord_df_rtk, by = 'kspnr')
+coord_deviation_df$x_deviation <- coord_deviation_df$x_rtk - coord_deviation_df$x_non_rtk
+coord_deviation_df$y_deviation <- coord_deviation_df$y_rtk - coord_deviation_df$y_non_rtk
+coord_deviation_df$euclidean_deviation <- sqrt(
+  coord_deviation_df$x_deviation^2 + coord_deviation_df$y_deviation^2
+)
+
+# numbers for the text below
+n_dev      <- nrow(coord_deviation_df)
+dev_mean   <- round(mean(coord_deviation_df$euclidean_deviation), 1)
+dev_max    <- round(max(coord_deviation_df$euclidean_deviation), 1)
+```
+
+Across the `r n_dev` remeasured plots, the RTK correction shifts the plot centers by `r dev_mean` m on average, and individual shifts reach up to `r dev_max` m. This is the same order of magnitude as the GNSS positioning errors reported for forested environments (McRoberts et al., 2018) and illustrates why the correction matters before linking the plots to remote sensing data.
+
+The scatter of the per-axis deviations shows in which direction the original GNSS positions were displaced.
+
+```{r}
+#| label: fig-coord-deviation-scatter
+#| echo: false
+#| fig-cap: 'Coordinate deviation (RTK − non-RTK) for each plot.'
+ggplot(coord_deviation_df, aes(x = x_deviation, y = y_deviation)) +
+  geom_point(alpha = 0.6, size = 2) +
+  geom_hline(yintercept = 0, linetype = 'dashed', colour = 'red') +
+  geom_vline(xintercept = 0, linetype = 'dashed', colour = 'red') +
+  annotate(
+    'label',
+    x = max(coord_deviation_df$x_deviation),
+    y = max(coord_deviation_df$y_deviation),
+    label = paste0('Mean eucl. dev. = ',
+                   round(mean(coord_deviation_df$euclidean_deviation), 2), ' m\n',
+                   'Max eucl. dev. = ',
+                   round(max(coord_deviation_df$euclidean_deviation), 2), ' m'),
+    hjust = 1, vjust = 1, size = 3, fill = 'grey85'
+  ) +
+  coord_fixed(ratio = 1) +
+  labs(x = 'X deviation (RTK − non-RTK) [m]',
+       y = 'Y deviation (RTK − non-RTK) [m]') +
+  theme_bw()
+```
+
+
 
 #### References
 
