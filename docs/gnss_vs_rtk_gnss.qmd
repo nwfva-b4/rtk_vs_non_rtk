@@ -214,7 +214,7 @@ Because the same plots are available both with their original GNSS coordinates a
 ```{r}
 #| label: deviation-data
 #| include: false
-# read unfiltered plot dataset
+# read unfiltered plot set
 inv_attr_plots_rtk <- st_read(
   file.path(processed_data_dir, 'forest_inventory', 'inv_attr_plots_rtk_unfiltered.gpkg'),
   quiet = T
@@ -280,6 +280,76 @@ ggplot(coord_deviation_df, aes(x = x_deviation, y = y_deviation)) +
 ```
 
 
+
+### Stand heights vs. ALS height metrics
+
+A more applied way to assess the benefit of RTK correction is to look at how well the terrestrial field data match the ALS data. To this end, the mean stand height (*H~m~*), derived from the trees of each plot, is compared with the 99th height percentile (*HAG_p99*) derived from all returns of the ALS data within the 13 m plot circle. Among the tested ALS metrics (the 90th, 95th, and 99th height percentiles and the maximum height), the 99th percentile generally agreed best with the stand heights and is used here throughout (this metric comparison was carried out in the script `scripts/stand_heights_vs_ALS_heights.R`). The comparison is carried out separately for the leaf-on and leaf-off acquisitions and for the original GNSS (non-RTK) and the RTK-corrected plot positions. If RTK correction improves the co-registration between field plots and ALS data, the agreement between *H~m~* and *HAG_p99* should be closer for the RTK positions.
+
+This analysis uses the filtered plot set, i.e. four plots with large leaf-on/leaf-off height differences are excluded, so that canopy change between the two acquisitions (e.g. treefall or harvest) does not influence the comparison.
+
+```{r}
+#| label: stand-als-data
+#| include: false
+metrics_dir <- file.path(processed_data_dir, 'metrics')
+
+# read per-plot ALS height metrics (filtered plot set) and keep
+# only the mean stand height (Hm) and the 99th ALS height percentile
+read_metric <- function(f, ssn, pos) {
+  st_read(file.path(metrics_dir, f), quiet = T) |>
+    sf::st_drop_geometry() |>
+    dplyr::select(kspnr, Hm, HAG_p99) |>
+    dplyr::mutate(season = ssn, positioning = pos)
+}
+
+stand_als <- dplyr::bind_rows(
+  read_metric('height_percentiles_lon_rtk.gpkg', 'leaf-on', 'RTK'),
+  read_metric('height_percentiles_loff_rtk.gpkg', 'leaf-off', 'RTK'),
+  read_metric('height_percentiles_lon_non_rtk.gpkg', 'leaf-on', 'non-RTK'),
+  read_metric('height_percentiles_loff_non_rtk.gpkg', 'leaf-off', 'non-RTK')
+)
+stand_als$season <- factor(stand_als$season, levels = c('leaf-on', 'leaf-off'))
+
+# pearson's r between Hm and HAG_p99 per season and positioning
+stand_als_cors <- stand_als |>
+  dplyr::group_by(season, positioning) |>
+  dplyr::summarise(r = cor(Hm, HAG_p99, use = 'pairwise.complete.obs'),
+                   .groups = 'drop')
+
+# helper for the inline numbers below
+r_val <- function(ssn, pos) {
+  round(stand_als_cors$r[stand_als_cors$season == ssn &
+                         stand_als_cors$positioning == pos], 2)
+}
+```
+
+```{r}
+#| label: fig-stand-als
+#| echo: false
+#| fig-cap: 'Mean stand height (*H~m~*) vs. the 99th ALS height percentile (*HAG_p99*), for RTK and non-RTK plot positions.'
+#| fig-width: 9
+#| fig-height: 4.6
+#| out-width: '100%'
+axis_lims <- range(c(stand_als$HAG_p99, stand_als$Hm), na.rm = T)
+
+ggplot(stand_als, aes(x = HAG_p99, y = Hm, colour = positioning)) +
+  geom_point(alpha = 0.5, size = 1.5) +
+  geom_abline(slope = 1, intercept = 0, linetype = 'dashed', colour = 'black') +
+  geom_text(data = stand_als_cors,
+            aes(label = paste0('r = ', round(r, 2)), colour = positioning,
+                vjust = ifelse(positioning == 'RTK', 1.5, 3)),
+            x = -Inf, y = Inf, hjust = -0.2, size = 3.5,
+            show.legend = F, inherit.aes = F) +
+  scale_colour_manual(values = c('RTK' = 'grey20', 'non-RTK' = 'grey60')) +
+  facet_wrap(~ season) +
+  coord_equal(xlim = axis_lims, ylim = axis_lims) +
+  labs(x = expression(italic('HAG_p99') ~ '[m]'),
+       y = expression(italic(H[m]) ~ '[m]'),
+       colour = 'Positioning') +
+  theme_bw() +
+  theme(panel.grid = element_blank())
+```
+
+For both acquisitions, the agreement between mean stand height and the 99th ALS height percentile is clearly higher for the RTK-corrected positions. Under **leaf-on** conditions, the correlation increases from **r = `r r_val('leaf-on', 'non-RTK')` (non-RTK) to r = `r r_val('leaf-on', 'RTK')` (RTK)**, and under **leaf-off** conditions from **r = `r r_val('leaf-off', 'non-RTK')` to r = `r r_val('leaf-off', 'RTK')`**. The RTK positions also produce fewer plots that fall far from the 1:1 line, which are typically cases where a positional error moved the plot circle onto neighbouring trees or even another stand of a different height. This supports the expectation that more accurate plot coordinates improve the match between terrestrial and ALS-based heights.
 
 #### References
 
