@@ -50,13 +50,19 @@ bi_trees <- bi_trees[
 head(bi_points)
 head(bi_trees)
 
-# read remeasured plots (RTK-GNSS)
-# already prepared in script dat_prep.R
-bi_plots_rtk <- sf::st_read(
+# read remeasured plots (RTK-GNSS), both prepared in script dat_prep.R:
+# - filtered set: plots with large leaf-on/leaf-off height differences removed,
+#   used for the ALS-based height analyses
+# - unfiltered set: all plots, used for the purely positional RTK vs. non-RTK
+#   comparison, which is unaffected by the leaf-on/leaf-off height filter
+bi_plots_rtk_filtered <- sf::st_read(
   file.path(bi_rtk_path, 'bi_center_points_merged_filtered.gpkg')
   )
+bi_plots_rtk_unfiltered <- sf::st_read(
+  file.path(bi_rtk_path, 'bi_center_points_merged.gpkg')
+  )
 
-head(bi_plots_rtk)
+head(bi_plots_rtk_filtered)
 
 
 
@@ -363,50 +369,63 @@ trees_base <- bi_points_trees
 
 
 
-# 04: prepare plot geometries and include remeasured RTK-GNSS plots
+# 04: build and save per-plot inventory attributes
 #-------------------------------------------------------------------------------
 
-# unique plot table used for RTK replacement and later filtering
-plot_base <- unique(
-  trees_base[, c('key', 'kspnr', 'abt', 'rw', 'hw')]
-)
+# the geometry preparation, per-plot aggregation, and saving below
+# are run for both the filtered and the unfiltered RTK plot set
+build_and_save_inv_attr_plots <- function(bi_plots_rtk, suffix = '',
+                                          write_diagnostics = FALSE) {
 
-# conversion to sf object (DHDN / 3-degree Gauss-Kruger zone 3)
-plot_base_gk <- sf::st_as_sf(
-  plot_base, coords = c('rw', 'hw'), crs = 31467
+  cat('\n== Building inv_attr_plots', if (nzchar(suffix)) suffix else '(filtered)',
+      'from', nrow(bi_plots_rtk), 'RTK plots ==\n')
+
+  # -- prepare plot geometries and include remeasured RTK-GNSS plots ----------
+
+  # unique plot table used for RTK replacement and later filtering
+  plot_base <- unique(
+    trees_base[, c('key', 'kspnr', 'abt', 'rw', 'hw')]
   )
 
-# transformation to ETRS89 / UTM zone 32N
-plot_base_utm <- sf::st_transform(plot_base_gk, crs = 25832)
+  # conversion to sf object (DHDN / 3-degree Gauss-Kruger zone 3)
+  plot_base_gk <- sf::st_as_sf(
+    plot_base, coords = c('rw', 'hw'), crs = 31467
+  )
 
-# merge remeasured plots into plot_base_utm
-plot_base_utm$remeasured <- 'no'
+  # transformation to ETRS89 / UTM zone 32N
+  plot_base_utm <- sf::st_transform(plot_base_gk, crs = 25832)
 
-# identify matching plots based on kspnr column
-matching_plots <- plot_base_utm$kspnr %in% bi_plots_rtk$kspnr
+  # merge remeasured plots into plot_base_utm
+  plot_base_utm$remeasured <- 'no'
 
-# mark remeasured plots
-plot_base_utm$remeasured[matching_plots] <- 'yes'
+  # identify matching plots based on kspnr column
+  matching_plots <- plot_base_utm$kspnr %in% bi_plots_rtk$kspnr
 
-# add further RTK-related information
-# NA for plots without RTK position
-plot_base_utm <- dplyr::left_join(
-  plot_base_utm,
-  sf::st_drop_geometry(
-    bi_plots_rtk[, c('kspnr', 'center_point_estimated',
-                     'solution_status', 'measurement_date',
-                     'height_loff', 'height_lon', 'height_diff')]
+  # mark remeasured plots
+  plot_base_utm$remeasured[matching_plots] <- 'yes'
+
+  # add further RTK-related information
+  # NA for plots without RTK position
+  plot_base_utm <- dplyr::left_join(
+    plot_base_utm,
+    sf::st_drop_geometry(
+      bi_plots_rtk[, c('kspnr', 'center_point_estimated',
+                       'solution_status', 'measurement_date',
+                       'height_loff', 'height_lon', 'height_diff')]
     ),
-  by = 'kspnr'
-)
+    by = 'kspnr'
+  )
 
-# create sf object with non-RTK geometries (without RTK position)
-remeasured_plots_non_rtk <- plot_base_utm[matching_plots, ]
+  # create sf object with non-RTK geometries (without RTK position)
+  remeasured_plots_non_rtk <- plot_base_utm[matching_plots, ]
 
-# for plots that were remeasured,
-# update their geometry with the more accurate RTK positions
-if (any(matching_plots)) {
-  
+  # for plots that were remeasured,
+  # update their geometry with the more accurate RTK positions
+  if (!any(matching_plots)) {
+    cat('No matching plots found between plot_base_utm and bi_plots_rtk\n')
+    return(invisible(NULL))
+  }
+
   # update geometry for remeasured plots
   for (i in which(matching_plots)) {
     kspnr_val <- plot_base_utm$kspnr[i]
@@ -415,257 +434,253 @@ if (any(matching_plots)) {
       sf::st_geometry(plot_base_utm)[i] <- sf::st_geometry(bi_plots_rtk)[rtk_row[1]]
     }
   }
-  
+
   # create sf object with RTK geometries (after RTK update)
   remeasured_plots_rtk <- plot_base_utm[matching_plots, ]
-  
+
   cat('Updated', sum(matching_plots), 'plots with RTK-GNSS coordinates\n')
-  cat('Created remeasured_plots_non_rtk:', nrow(remeasured_plots_non_rtk), 'plots with original geometries\n')
-  cat('Created remeasured_plots_rtk:', nrow(remeasured_plots_rtk), 'plots with RTK geometries\n')
-  
-} else {
-  
-  cat('No matching plots found between inv_attr_plots_utm and bi_plots_rtk\n')
-  remeasured_plots_non_rtk <- NULL
-  remeasured_plots_rtk <- NULL
-  
-}
 
+  # -- build tree-level table and aggregate per sample plot -------------------
 
+  # keep only trees from the RTK plot domain
+  plot_ids_rtk <- sf::st_drop_geometry(
+    remeasured_plots_rtk[, c('key', 'kspnr')]
+  )
+  trees_rtk <- dplyr::semi_join(
+    trees_base,
+    plot_ids_rtk,
+    by = c('key', 'kspnr')
+  )
 
-# 05: build tree-level table and aggregate per sample plot
-#-------------------------------------------------------------------------------
+  # add final RTK coordinates and quality metadata to tree-level dataset
+  plot_coords_rtk <- sf::st_drop_geometry(
+    dplyr::mutate(
+      remeasured_plots_rtk,
+      rtk_x = sf::st_coordinates(remeasured_plots_rtk)[, 1],
+      rtk_y = sf::st_coordinates(remeasured_plots_rtk)[, 2]
+    )[, c(
+      'key', 'kspnr', 'remeasured', 'center_point_estimated',
+      'solution_status', 'measurement_date', 'height_loff', 'height_lon',
+      'height_diff', 'rtk_x', 'rtk_y'
+    )]
+  )
+  inv_attr_trees_rtk <- dplyr::left_join(
+    trees_rtk,
+    plot_coords_rtk,
+    by = c('key', 'kspnr')
+  )
 
-# keep only trees from the RTK plot domain
-plot_ids_rtk <- sf::st_drop_geometry(
-  remeasured_plots_rtk[, c('key', 'kspnr')]
-)
-trees_rtk <- dplyr::semi_join(
-  trees_base,
-  plot_ids_rtk,
-  by = c('key', 'kspnr')
-)
+  # add original (non-RTK) coordinates and metadata to tree-level dataset
+  plot_ids_non_rtk <- sf::st_drop_geometry(
+    remeasured_plots_non_rtk[, c('key', 'kspnr')]
+  )
+  trees_non_rtk <- dplyr::semi_join(
+    trees_base,
+    plot_ids_non_rtk,
+    by = c('key', 'kspnr')
+  )
+  plot_coords_non_rtk <- sf::st_drop_geometry(
+    dplyr::mutate(
+      remeasured_plots_non_rtk,
+      non_rtk_x = sf::st_coordinates(remeasured_plots_non_rtk)[, 1],
+      non_rtk_y = sf::st_coordinates(remeasured_plots_non_rtk)[, 2]
+    )[, c(
+      'key', 'kspnr', 'remeasured', 'center_point_estimated',
+      'solution_status', 'measurement_date', 'height_loff', 'height_lon',
+      'height_diff', 'non_rtk_x', 'non_rtk_y'
+    )]
+  )
+  inv_attr_trees_non_rtk <- dplyr::left_join(
+    trees_non_rtk,
+    plot_coords_non_rtk,
+    by = c('key', 'kspnr')
+  )
 
-# add final RTK coordinates and quality metadata to tree-level dataset
-plot_coords_rtk <- sf::st_drop_geometry(
-  dplyr::mutate(
+  # add column of leaf type
+  trees_rtk$leaf_type <- ifelse(
+    trees_rtk$bagr %in% c('EI', 'ALN', 'BU', 'ALH'),
+    'deciduous',
+    'coniferous'
+  )
+
+  # group sums of volume, AGB,
+  # and other forest inventory attributes like
+  # tree density, basal area, and QMD
+  trees_rtk <- trees_rtk %>%
+    dplyr::group_by(key, kspnr) %>%
+    dplyr::mutate(
+      total_vol_ha = sum(total_vol * nha),
+      merch_vol_ha = sum(merch_vol * nha),
+      agb_ha = sum(agb * nha) / 1000,
+      tree_density = mean(nha),
+      basal_area_tree = (pi / 4) * (bhd / 100)^2,
+      basal_area_ha = sum(basal_area_tree * nha, na.rm = T),
+      dg = sqrt(sum(bhd^2 * nha, na.rm = T) / sum(nha, na.rm = T)),
+      # assign dominant leaf type to each plot based on the basal area
+      # share of deciduous vs. coniferous trees, considering only trees
+      # from layer 1 (Hauptbestand) and 4 (Ueberhaelter)
+      total_deciduous = sum(dplyr::if_else(
+        leaf_type == 'deciduous' & bestschicht %in% c(1, 4),
+        basal_area_tree * nha, 0, missing = 0), na.rm = T),
+      total_coniferous = sum(dplyr::if_else(
+        leaf_type == 'coniferous' & bestschicht %in% c(1, 4),
+        basal_area_tree * nha, 0, missing = 0), na.rm = T),
+      dominant_leaf_type = dplyr::case_when(
+        total_deciduous > total_coniferous ~ 'deciduous',
+        total_coniferous > total_deciduous ~ 'coniferous',
+        TRUE                               ~ 'mixed'
+      )) %>%
+    dplyr::ungroup()
+
+  # extract unique forest inventory variables for all sample plots
+  inv_attr_plots <- unique(
+    trees_rtk[, c(
+      'key', 'kspnr', 'abt', 'total_vol_ha', 'merch_vol_ha',
+      'agb_ha', 'tree_density', 'basal_area_ha', 'dg', 'dominant_leaf_type'
+    )]
+  )
+  inv_attr_plots[is.na(inv_attr_plots)] <- 0
+
+  # attach aggregated attributes back to plot geometries
+  remeasured_plots_rtk <- dplyr::left_join(
     remeasured_plots_rtk,
-    rtk_x = sf::st_coordinates(remeasured_plots_rtk)[, 1],
-    rtk_y = sf::st_coordinates(remeasured_plots_rtk)[, 2]
-  )[, c(
-    'key', 'kspnr', 'remeasured', 'center_point_estimated',
-    'solution_status', 'measurement_date', 'height_loff', 'height_lon',
-    'height_diff', 'rtk_x', 'rtk_y'
-  )]
-)
-inv_attr_trees_rtk <- dplyr::left_join(
-  trees_rtk,
-  plot_coords_rtk,
-  by = c('key', 'kspnr')
-)
-
-# add original (non-RTK) coordinates and metadata to tree-level dataset
-plot_ids_non_rtk <- sf::st_drop_geometry(
-  remeasured_plots_non_rtk[, c('key', 'kspnr')]
-)
-trees_non_rtk <- dplyr::semi_join(
-  trees_base,
-  plot_ids_non_rtk,
-  by = c('key', 'kspnr')
-)
-plot_coords_non_rtk <- sf::st_drop_geometry(
-  dplyr::mutate(
+    inv_attr_plots,
+    by = c('key', 'kspnr', 'abt')
+  )
+  remeasured_plots_non_rtk <- dplyr::left_join(
     remeasured_plots_non_rtk,
-    non_rtk_x = sf::st_coordinates(remeasured_plots_non_rtk)[, 1],
-    non_rtk_y = sf::st_coordinates(remeasured_plots_non_rtk)[, 2]
-  )[, c(
-    'key', 'kspnr', 'remeasured', 'center_point_estimated',
-    'solution_status', 'measurement_date', 'height_loff', 'height_lon',
-    'height_diff', 'non_rtk_x', 'non_rtk_y'
-  )]
-)
-inv_attr_trees_non_rtk <- dplyr::left_join(
-  trees_non_rtk,
-  plot_coords_non_rtk,
-  by = c('key', 'kspnr')
-)
+    inv_attr_plots,
+    by = c('key', 'kspnr', 'abt')
+  )
 
-# add column of leaf type
-unique(trees_rtk$bagr)
-trees_rtk$leaf_type <- ifelse(
-  trees_rtk$bagr %in% c('EI', 'ALN', 'BU', 'ALH'),
-  'deciduous',
-  'coniferous'
-)
+  out_path <- file.path(processed_data_dir, 'forest_inventory')
 
-# group sums of volume, AGB,
-# and other forest inventory attributes like
-# tree density, basal area, and QMD
-trees_rtk <- trees_rtk %>%
-  dplyr::group_by(key, kspnr) %>%
-  dplyr::mutate(
-    total_vol_ha = sum(total_vol * nha),
-    merch_vol_ha = sum(merch_vol * nha),
-    agb_ha = sum(agb * nha) / 1000,
-    tree_density = mean(nha),
-    basal_area_tree = (pi / 4) * (bhd / 100)^2,
-    basal_area_ha = sum(basal_area_tree * nha, na.rm = T),
-    dg = sqrt(sum(bhd^2 * nha, na.rm = T) / sum(nha, na.rm = T)),
-    # assign dominant leaf type to each plot based on the basal area
-    # share of deciduous vs. coniferous trees, considering only trees
-    # from layer 1 (Hauptbestand) and 4 (Ueberhaelter)
-    total_deciduous = sum(dplyr::if_else(
-      leaf_type == 'deciduous' & bestschicht %in% c(1, 4),
-      basal_area_tree * nha, 0, missing = 0), na.rm = T),
-    total_coniferous = sum(dplyr::if_else(
-      leaf_type == 'coniferous' & bestschicht %in% c(1, 4),
-      basal_area_tree * nha, 0, missing = 0), na.rm = T),
-    dominant_leaf_type = dplyr::case_when(
-      total_deciduous > total_coniferous ~ 'deciduous',
-      total_coniferous > total_deciduous ~ 'coniferous',
-      TRUE                               ~ 'mixed'
-    )) %>%
-  dplyr::ungroup()
+  # diagnostics (summary statistics and boxplots) for the main filtered set
+  if (write_diagnostics) {
 
-# extract unique forest inventory variables for all sample plots
-inv_attr_plots <- unique(
-  trees_rtk[, c(
-    'key', 'kspnr', 'abt', 'total_vol_ha', 'merch_vol_ha',
-    'agb_ha', 'tree_density', 'basal_area_ha', 'dg', 'dominant_leaf_type'
-  )]
-)
-inv_attr_plots[is.na(inv_attr_plots)] <- 0
+    summary_df <- as.data.frame(
+      do.call(cbind, lapply(remeasured_plots_rtk, summary))
+    )
+    write.csv(
+      summary_df,
+      file.path(out_path, 'summary_stats_inv_attr_plots_rtk.csv')
+    )
+    table_df <- as.data.frame(table(remeasured_plots_rtk$dominant_leaf_type))
+    write.csv(
+      table_df,
+      file.path(out_path, 'n_plots_dom_leaf_type.csv'),
+      row.names = F
+    )
 
-# attach aggregated attributes back to plot geometries
-remeasured_plots_rtk <- dplyr::left_join(
-  remeasured_plots_rtk,
-  inv_attr_plots,
-  by = c('key', 'kspnr', 'abt')
-)
-remeasured_plots_non_rtk <- dplyr::left_join(
-  remeasured_plots_non_rtk,
-  inv_attr_plots,
-  by = c('key', 'kspnr', 'abt')
-)
+    par(mfrow = c(2, 3))
+    boxplot(remeasured_plots_rtk$total_vol_ha)
+    boxplot(remeasured_plots_rtk$merch_vol_ha)
+    boxplot(remeasured_plots_rtk$agb_ha)
+    boxplot(remeasured_plots_rtk$tree_density)
+    boxplot(remeasured_plots_rtk$basal_area_ha)
+    boxplot(remeasured_plots_rtk$dg)
+    par(mfrow = c(1, 1))
+  }
 
-# summary statistics
-summary(remeasured_plots_rtk)
-summary_df <- as.data.frame(
-  do.call(cbind, lapply(remeasured_plots_rtk, summary))
-)
-write.csv(
-  summary_df,
-  file.path(
-    processed_data_dir,
-    'forest_inventory',
-    'summary_stats_inv_attr_plots_rtk.csv')
-)
-table(remeasured_plots_rtk$dominant_leaf_type)
-table_df <- as.data.frame(table(remeasured_plots_rtk$dominant_leaf_type))
-write.csv(
-  table_df,
-  file.path(
-    processed_data_dir,
-    'forest_inventory',
-    'n_plots_dom_leaf_type.csv'),
-  row.names = F
-)
+  # -- save BI plots with the forest inventory attributes per sample plot -----
 
-# boxplots
-par(mfrow = c(2,3))
-boxplot(remeasured_plots_rtk$total_vol_ha)
-boxplot(remeasured_plots_rtk$merch_vol_ha)
-boxplot(remeasured_plots_rtk$agb_ha)
-boxplot(remeasured_plots_rtk$tree_density)
-boxplot(remeasured_plots_rtk$basal_area_ha)
-boxplot(remeasured_plots_rtk$dg)
-par(mfrow = c(1,1))
+  # define file formats and corresponding save functions
+  file_formats <- list(
+    rds = list(
+      ext = '.RDS',
+      save_func = saveRDS
+    ),
+    txt = list(
+      ext = '.txt',
+      save_func = function(data, file)
+        write.table(data, file, sep = '\t', row.names = F)
+    ),
+    gpkg = list(
+      ext = '.gpkg',
+      save_func = function(data, file)
+        sf::st_write(data, file, delete_dsn = T, quiet = T)
+    )
+  )
+
+  # define datasets to save (output names carry the suffix)
+  datasets <- list(
+    list(
+      name = paste0('inv_attr_plots_rtk', suffix),
+      data = remeasured_plots_rtk,
+      drop_geom = T
+    ),
+    list(
+      name = paste0('inv_attr_plots_non_rtk', suffix),
+      data = remeasured_plots_non_rtk,
+      drop_geom = T
+    ),
+    list(
+      name = paste0('inv_attr_trees_rtk', suffix),
+      data = inv_attr_trees_rtk,
+      drop_geom = F
+    ),
+    list(
+      name = paste0('inv_attr_trees_non_rtk', suffix),
+      data = inv_attr_trees_non_rtk,
+      drop_geom = F
+    )
+  )
+
+  # loop through each file format
+  for (format_name in names(file_formats)) {
+
+    format_info <- file_formats[[format_name]]
+
+    # check if all files exist for this format
+    all_files_exist <- all(sapply(datasets, function(ds) {
+      file.exists(file.path(out_path, paste0(ds$name, format_info$ext)))
+    }))
+
+    if (!all_files_exist) {
+
+      cat('Saving files in', format_name, 'format...\n')
+
+      # save each dataset
+      for (ds in datasets) {
+
+        file_path <- file.path(out_path, paste0(ds$name, format_info$ext))
+
+        # prepare data based on format
+        if (format_name %in% c('rds', 'txt') && ds$drop_geom) {
+          data_to_save <- sf::st_drop_geometry(ds$data)
+        } else {
+          data_to_save <- ds$data
+        }
+
+        # save using appropriate function
+        format_info$save_func(data_to_save, file_path)
+        cat('  Saved:', basename(file_path), '\n')
+
+      }
+
+    } else {
+
+      cat('All', format_name, 'files already exist. Skipping.\n')
+
+    }
+
+  }
+
+  invisible(NULL)
+}
 
 
 
-# 06: save BI plots with the forest inventory attributes per sample plot
+# 05: run for the filtered and the unfiltered RTK plot set
 #-------------------------------------------------------------------------------
 
-out_path <- file.path(processed_data_dir, 'forest_inventory')
-
-# define file formats and corresponding save functions
-file_formats <- list(
-  rds = list(
-    ext = '.RDS',
-    save_func = saveRDS
-  ),
-  txt = list(
-    ext = '.txt',
-    save_func = function(data, file) 
-      write.table(data, file, sep = '\t', row.names = F)
-  ),
-  gpkg = list(
-    ext = '.gpkg',
-    save_func = function(data, file) 
-      sf::st_write(data, file, delete_dsn = T, quiet = T)
-  )
+# filtered set (used for the ALS-based height analyses): original file names
+build_and_save_inv_attr_plots(
+  bi_plots_rtk_filtered, suffix = '', write_diagnostics = TRUE
 )
 
-# define datasets to save
-datasets <- list(
-  list(
-    name = 'inv_attr_plots_rtk',
-    data = remeasured_plots_rtk,
-    drop_geom = T
-  ),
-  list(
-    name = 'inv_attr_plots_non_rtk',
-    data = remeasured_plots_non_rtk,
-    drop_geom = T
-  ),
-  list(
-    name = 'inv_attr_trees_rtk',
-    data = inv_attr_trees_rtk,
-    drop_geom = F
-  ),
-  list(
-    name = 'inv_attr_trees_non_rtk',
-    data = inv_attr_trees_non_rtk,
-    drop_geom = F
-  )
+# unfiltered set (used for the positional RTK vs. non-RTK comparison):
+# same outputs with an '_unfiltered' suffix
+build_and_save_inv_attr_plots(
+  bi_plots_rtk_unfiltered, suffix = '_unfiltered', write_diagnostics = FALSE
 )
-
-# loop through each file format
-for (format_name in names(file_formats)) {
-  
-  format_info <- file_formats[[format_name]]
-  
-  # check if all files exist for this format
-  all_files_exist <- all(sapply(datasets, function(ds) {
-    file.exists(file.path(out_path, paste0(ds$name, format_info$ext)))
-  }))
-  
-  if (!all_files_exist) {
-    
-    cat('Saving files in', format_name, 'format...\n')
-    
-    # save each dataset
-    for (ds in datasets) {
-      
-      file_path <- file.path(out_path, paste0(ds$name, format_info$ext))
-      
-      # prepare data based on format
-      if (format_name %in% c('rds', 'txt') && ds$drop_geom) {
-        data_to_save <- sf::st_drop_geometry(ds$data)
-      } else {
-        data_to_save <- ds$data
-      }
-      
-      # save using appropriate function
-      format_info$save_func(data_to_save, file_path)
-      cat('  Saved:', basename(file_path), '\n')
-      
-    }
-    
-  } else {
-    
-    cat('All', format_name, 'files already exist. Skipping.\n')
-    
-  }
-  
-}
